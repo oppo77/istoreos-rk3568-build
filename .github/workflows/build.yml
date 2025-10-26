@@ -1,4 +1,4 @@
-name: Build iStoreOS for RK3568
+name: Build iStoreOS for RK3568 with QWRT 5G
 
 on:
   push:
@@ -13,44 +13,67 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4  # 将仓库文件拉取到工作目录（当前目录为仓库根目录）
+        uses: actions/checkout@v4  # 将仓库文件拉取到工作目录
 
       - name: Install dependencies
         run: |
           sudo apt update
-          # 补充编译所需依赖（原依赖基础上增加libncursesw5-dev等，避免缺失）
-          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev python3-distutils rsync unzip zlib1g-dev file wget
+          # 补充编译所需依赖（包含5G模组可能需要的额外工具）
+          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev python3-distutils rsync unzip zlib1g-dev file wget libusb-1.0-0-dev
 
       - name: Clone iStoreOS source
         run: |
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
-          cd istoreos-src  # 克隆源码到当前目录下的istoreos-src文件夹
+          cd istoreos-src
+
+      - name: Add QWRT 5G support feeds
+        run: |
+          cd istoreos-src
+          # 添加QWRT项目源（包含5G模组支持组件）
+          echo "src-git qwrt https://github.com/qwrt-project/qwrt-packages.git" >> feeds.conf.default
+          # 添加广和通模组专用驱动源（如有）
+          echo "src-git quectel https://github.com/quectel/quectel-openwrt.git" >> feeds.conf.default
 
       - name: Load custom config
         run: |
-          # 复制仓库根目录的.config到源码目录（路径正确，当前目录是仓库根目录）
           cp ./.config istoreos-src/.config
+          # 自动添加5G模组必要配置（若.config中未包含）
+          cd istoreos-src
+          echo "CONFIG_PACKAGE_kmod-usb-serial=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-usb-serial-qcserial=y" >> .config  # 高通串口驱动（FM35OGL基于高通）
+          echo "CONFIG_PACKAGE_kmod-qmi-wwan=y" >> .config  # QMI协议支持
+          echo "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y" >> .config
+          echo "CONFIG_PACKAGE_modemmanager=y" >> .config  # 调制解调器管理工具
+          echo "CONFIG_PACKAGE_modemmanager-ppp=y" >> .config
+          echo "CONFIG_PACKAGE_luci-proto-qmi=y" >> .config  # LuCI QMI协议支持
+          echo "CONFIG_PACKAGE_qmi-utils=y" >> .config  # QMI工具集
+          echo "CONFIG_PACKAGE_uqmi=y" >> .config  # 轻量QMI客户端
+          echo "CONFIG_PACKAGE_qwrt-modem=y" >> .config  # QWRT模组核心组件
+          echo "CONFIG_PACKAGE_qwrt-modem-quectel=y" >> .config  # 广和通模组适配
 
       - name: Copy custom files
         run: |
-          # 复制仓库根目录的files目录到源码目录（路径修正为./files）
+          # 复制自定义配置（如5G模组拨号脚本、udev规则等）
           cp -r ./files istoreos-src/
+          # 若有FM35OGL专用配置，可在此处添加
+          mkdir -p istoreos-src/files/etc/modprobe.d/
+          echo "options qcserial vendor=0x05c6 product=0x90b2" > istoreos-src/files/etc/modprobe.d/fm35ogl.conf  # FM35OGL的USB VID/PID
 
       - name: Update and install feeds
         run: |
           cd istoreos-src
-          ./scripts/feeds update -a  # 更新软件源
-          ./scripts/feeds install -a  # 安装所有软件包
+          ./scripts/feeds update -a  # 更新包含QWRT的源
+          ./scripts/feeds install -a  # 安装所有包（包括新增的5G组件）
 
       - name: Build firmware
         run: |
           cd istoreos-src
-          make -j$(nproc) defconfig  # 生成默认配置（合并自定义.config）
-          make -j$(nproc) download V=s  # 下载依赖包（V=s显示详细日志）
-          make -j$(nproc) V=s  # 编译固件（根据CPU核心数自动分配线程）
+          make -j$(nproc) defconfig  # 合并配置
+          make -j$(nproc) download V=s  # 下载依赖（包含QWRT组件）
+          make -j$(nproc) V=s  # 编译固件
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: istoreos-rk3568-firmware
-          path: istoreos-src/bin/targets/rockchip/armv8/*.img  # RK3568属于armv8架构，产物在此路径
+          name: istoreos-rk3568-5g-firmware
+          path: istoreos-src/bin/targets/rockchip/armv8/*.img
