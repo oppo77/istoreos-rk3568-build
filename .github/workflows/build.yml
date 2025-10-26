@@ -1,4 +1,4 @@
-name: Build iStoreOS for RK3568 with QWRT 5G
+name: Build iStoreOS for RK3568 with 5G (FM35OGL)
 
 on:
   push:
@@ -25,69 +25,42 @@ jobs:
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
           cd istoreos-src
 
-      - name: 清除所有默认feeds配置（避免自动添加网络源）
+      - name: 清理所有自定义源（仅保留默认源）
         run: |
           cd istoreos-src
-          # 直接清空feeds配置文件，只保留必要的基础源
-          > feeds.conf.default
-          echo "src-git base https://github.com/openwrt/openwrt.git;openwrt-22.03" >> feeds.conf.default
-          echo "src-git packages https://github.com/openwrt/packages.git;openwrt-22.03" >> feeds.conf.default
-          echo "src-git luci https://github.com/openwrt/luci.git;openwrt-22.03" >> feeds.conf.default
+          # 恢复iStoreOS默认feeds配置，不添加任何第三方源
+          git checkout feeds.conf.default  # 用源码自带的默认配置
 
-      - name: 本地部署QWRT和Quectel包（完全脱离feeds网络依赖）
-        run: |
-          cd istoreos-src
-          # 创建本地包目录（直接放在package目录下，OpenWRT会自动识别）
-          mkdir -p package/qwrt package/quectel
-          
-          # 下载QWRT包并解压到package/qwrt
-          wget -t 3 -O qwrt.zip https://github.com/qwrt-project/qwrt-packages/archive/refs/heads/main.zip
-          unzip -q qwrt.zip
-          mv qwrt-packages-main/* package/qwrt/
-          rm -rf qwrt-packages-main qwrt.zip
-          
-          # 下载Quectel包并解压到package/quectel
-          wget -t 3 -O quectel.zip https://github.com/quectel/quectel-openwrt/archive/refs/heads/master.zip
-          unzip -q quectel.zip
-          mv quectel-openwrt-master/* package/quectel/
-          rm -rf quectel-openwrt-master quectel.zip
-          
-          # 验证本地包是否部署成功
-          echo "QWRT本地包内容："
-          ls -la package/qwrt
-          echo "Quectel本地包内容："
-          ls -la package/quectel
-
-      - name: 强制添加5G模组配置
+      - name: Load custom config (仅依赖默认组件)
         run: |
           cp ./.config istoreos-src/.config
           cd istoreos-src
-          # 确保必要组件配置
+          # 强制启用FM35OGL所需的核心组件（均来自OpenWRT默认源）
           sed -i '/CONFIG_PACKAGE_kmod-usb-serial/d' .config && echo "CONFIG_PACKAGE_kmod-usb-serial=y" >> .config
-          sed -i '/CONFIG_PACKAGE_kmod-usb-serial-qcserial/d' .config && echo "CONFIG_PACKAGE_kmod-usb-serial-qcserial=y" >> .config
-          sed -i '/CONFIG_PACKAGE_kmod-qmi-wwan/d' .config && echo "CONFIG_PACKAGE_kmod-qmi-wwan=y" >> .config
+          sed -i '/CONFIG_PACKAGE_kmod-usb-serial-qcserial/d' .config && echo "CONFIG_PACKAGE_kmod-usb-serial-qcserial=y" >> .config  # 高通串口驱动（FM35OGL核心依赖）
+          sed -i '/CONFIG_PACKAGE_kmod-qmi-wwan/d' .config && echo "CONFIG_PACKAGE_kmod-qmi-wwan=y" >> .config  # QMI协议驱动
           sed -i '/CONFIG_PACKAGE_kmod-usb-net-qmi-wwan/d' .config && echo "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y" >> .config
-          sed -i '/CONFIG_PACKAGE_modemmanager/d' .config && echo "CONFIG_PACKAGE_modemmanager=y" >> .config
+          sed -i '/CONFIG_PACKAGE_modemmanager/d' .config && echo "CONFIG_PACKAGE_modemmanager=y" >> .config  # 调制解调器管理
           sed -i '/CONFIG_PACKAGE_modemmanager-ppp/d' .config && echo "CONFIG_PACKAGE_modemmanager-ppp=y" >> .config
-          sed -i '/CONFIG_PACKAGE_luci-proto-qmi/d' .config && echo "CONFIG_PACKAGE_luci-proto-qmi=y" >> .config
-          sed -i '/CONFIG_PACKAGE_qmi-utils/d' .config && echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
-          sed -i '/CONFIG_PACKAGE_uqmi/d' .config && echo "CONFIG_PACKAGE_uqmi=y" >> .config
-          # 直接引用本地package目录下的包
-          sed -i '/CONFIG_PACKAGE_qwrt-modem/d' .config && echo "CONFIG_PACKAGE_qwrt-modem=y" >> .config
-          sed -i '/CONFIG_PACKAGE_qwrt-modem-quectel/d' .config && echo "CONFIG_PACKAGE_qwrt-modem-quectel=y" >> .config
+          sed -i '/CONFIG_PACKAGE_luci-proto-qmi/d' .config && echo "CONFIG_PACKAGE_luci-proto-qmi=y" >> .config  # LuCI配置界面
+          sed -i '/CONFIG_PACKAGE_qmi-utils/d' .config && echo "CONFIG_PACKAGE_qmi-utils=y" >> .config  # QMI调试工具
+          sed -i '/CONFIG_PACKAGE_uqmi/d' .config && echo "CONFIG_PACKAGE_uqmi=y" >> .config  # 轻量QMI客户端
+          sed -i '/CONFIG_PACKAGE_luci-app-modemmanager/d' .config && echo "CONFIG_PACKAGE_luci-app-modemmanager=y" >> .config  # 图形化管理界面
 
-      - name: 复制自定义设备配置
-        run: |
-          cp -r ./files istoreos-src/ 2>/dev/null || true
-          mkdir -p istoreos-src/files/etc/modprobe.d/
-          echo "options qcserial vendor=0x05c6 product=0x90b2" > istoreos-src/files/etc/modprobe.d/fm35ogl.conf
-
-      - name: 更新基础feeds并安装所有包（不含网络源）
+      - name: 配置FM35OGL专用识别规则
         run: |
           cd istoreos-src
-          # 只更新基础源（不涉及qwrt/quectel）
-          ./scripts/feeds update base packages luci
-          # 安装基础包+本地package目录下的包（无需更新qwrt/quectel，因为已在本地）
+          # 添加模组USB VID/PID识别（确保系统正确识别硬件）
+          mkdir -p files/etc/udev/rules.d/
+          echo 'SUBSYSTEM=="tty", ATTRS{idVendor}=="05c6", ATTRS{idProduct}=="90b2", SYMLINK+="ttyUSB_FM35OGL", MODE="0666"' > files/etc/udev/rules.d/99-fm35ogl.rules
+          # 配置modprobe加载参数
+          mkdir -p files/etc/modprobe.d/
+          echo "options qcserial vendor=0x05c6 product=0x90b2" > files/etc/modprobe.d/fm35ogl.conf
+
+      - name: 更新并安装默认feeds（无第三方源，避免冲突）
+        run: |
+          cd istoreos-src
+          ./scripts/feeds update -a  # 仅更新iStoreOS默认源
           ./scripts/feeds install -a
 
       - name: 编译固件
@@ -100,5 +73,5 @@ jobs:
       - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: istoreos-rk3568-5g-firmware
+          name: istoreos-rk3568-fm35ogl-firmware
           path: istoreos-src/bin/targets/rockchip/armv8/*.img
