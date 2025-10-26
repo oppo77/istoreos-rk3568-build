@@ -1,4 +1,4 @@
-name: Build iStoreOS for RK3568 (Complete Python Fix)
+name: Build iStoreOS for RK3568 (Correct Package Name)
 on:
   push:
     branches: [ main ]
@@ -13,64 +13,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install comprehensive dependencies
+      - name: Install correct elftools package
         run: |
           sudo apt update
-          # 安装系统依赖
-          sudo apt install -y \
-            build-essential \
-            clang flex bison g++ gawk \
-            gcc-multilib g++-multilib \
-            gettext git libncurses5-dev \
-            libncursesw5-dev libssl-dev \
-            libelf-dev python3 python3-pip \
-            python3-dev python3-venv \
-            rsync unzip zlib1g-dev file wget
-          
-          # 创建Python虚拟环境
-          python3 -m venv openwrt-env
-          echo "source openwrt-env/bin/activate" >> ~/.bashrc
-          source openwrt-env/bin/activate
-          
-          # 安装所有必要的Python模块
-          pip3 install --upgrade pip
+          # 尝试不同的包名
+          sudo apt install -y python3-pyelftools || \
+          sudo apt install -y python3-elftools || \
           pip3 install pyelftools
-          pip3 install future
-          pip3 install pycrypto
-          pip3 install pycryptodome
-          pip3 install cffi
-          pip3 install six
-          pip3 install setuptools
-          pip3 install wheel
           
-          # 验证安装
-          python3 -c "import elftools; print('elftools OK')"
-          python3 -c "import future; print('future OK')"
-          python3 -c "import Crypto; print('pycrypto OK')"
+          # 验证
+          python3 -c "import elftools; print('成功导入elftools')"
 
-      - name: Clone sources
+      - name: Install base deps
+        run: |
+          sudo apt install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev \
+            libncursesw5-dev libssl-dev libelf-dev python3 python3-pip \
+            rsync unzip zlib1g-dev file wget
+
+      - name: Clone and build
         run: |
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=istoreos-24.10 istoreos-src
           git clone https://github.com/Siriling/5G-Modem-Support.git --depth=1 5G-Modem-Support
-
-      - name: Setup build environment
-        run: |
-          # 激活Python环境
-          source openwrt-env/bin/activate
+          
           cd istoreos-src
-          
-          # 复制配置
           [ -f ../.config ] && cp ../.config .config || true
-          [ -d ../files ] && cp -r ../files . || true
-          
-          # 更新feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
-      - name: Build with Python environment
-        run: |
-          source openwrt-env/bin/activate
-          cd istoreos-src
           make defconfig
           make download
           make -j$(nproc) V=s
@@ -80,4 +49,3 @@ jobs:
         with:
           name: firmware
           path: istoreos-src/bin/targets/rockchip/armv8/*.img
-          retention-days: 30
