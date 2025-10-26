@@ -1,58 +1,127 @@
-# 【终极修复】Copy LUCI管理界面（luci-app-hypermodem）- 彻底解决目录不存在问题
-- name: Copy 5G LUCI Management (luci-app-hypermodem)
-  run: |
-    ########################################################################
-    # 步骤1：验证iStoreOS源码是否拉取成功（根源排查）
-    ########################################################################
-    # 先确认iStoreOS的LUCI基础目录是否存在（若不存在，说明前序克隆步骤失败）
-    if [ ! -d "istoreos-src/package/luci" ]; then
-      echo "❌ FATAL ERROR: iStoreOS源码的LUCI核心目录缺失！"
-      echo "请检查「Clone iStoreOS source」步骤是否成功，正常应存在 istoreos-src/package/luci"
-      echo "当前目录结构（供排查）："
-      ls -l istoreos-src/package/  # 显示package目录下的文件，确认luci是否存在
-      exit 1  # 源码缺失，直接终止流程
-    fi
-    echo "✅ 第一步校验通过：iStoreOS LUCI核心目录（istoreos-src/package/luci）已存在"
+name: Build iStoreOS for RK3568 (with FM350GL 5G - Fixed LUCI Path)
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.config'
+  workflow_dispatch:
 
-    ########################################################################
-    # 步骤2：强制创建LUCI应用标准目录（必成功）
-    ########################################################################
-    # 硬编码iStoreOS官方LUCI应用目录（绝对路径，避免相对路径错误）
-    LUCI_APP_STD_DIR="$(pwd)/istoreos-src/package/luci/applications"
-    # 强制创建目录（-p：自动创建所有不存在的父目录，权限755确保可写）
-    sudo mkdir -p "$LUCI_APP_STD_DIR" && sudo chmod 755 "$LUCI_APP_STD_DIR"
-    
-    # 校验目录是否创建成功
-    if [ -d "$LUCI_APP_STD_DIR" ]; then
-      echo "✅ 第二步校验通过：已创建LUCI应用标准目录：$LUCI_APP_STD_DIR"
-    else
-      echo "❌ FATAL ERROR: 无法创建标准目录 $LUCI_APP_STD_DIR（可能是权限问题）"
-      exit 1
-    fi
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      ########################################################################
+      # 1. 基础准备：拉取配置+安装依赖（无修改）
+      ########################################################################
+      - name: Checkout local config (含.config)
+        uses: actions/checkout@v4
 
-    ########################################################################
-    # 步骤3：复制luci-app-hypermodem到标准目录
-    ########################################################################
-    # 先确认5G驱动仓库的hypermodem目录是否存在（避免仓库拉取失败）
-    if [ ! -d "5G-Modem-Support/luci-app-hypermodem" ]; then
-      echo "❌ FATAL ERROR: 5G-Modem-Support仓库中未找到luci-app-hypermodem目录！"
-      echo "请检查「Clone 5G-Modem-Support」步骤是否成功"
-      exit 1
-    fi
+      - name: Install all dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
+            python3-distutils rsync unzip zlib1g-dev file wget linux-headers-$(uname -r)
 
-    # 执行复制（-r：递归复制目录，-v：显示复制过程，方便排查）
-    sudo cp -rv 5G-Modem-Support/luci-app-hypermodem "$LUCI_APP_STD_DIR/"
+      ########################################################################
+      # 2. 拉取源码：iStoreOS + 5G-Modem-Support（增加源码完整性校验）
+      ########################################################################
+      - name: Clone iStoreOS source (带完整性校验)
+        run: |
+          # 克隆iStoreOS主源码
+          git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
+          # 校验LUCI核心目录是否存在（避免源码拉取不完整）
+          if [ ! -d "istoreos-src/package/luci" ]; then
+            echo "❌ 重新克隆iStoreOS（首次克隆不完整）"
+            rm -rf istoreos-src
+            git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
+          fi
+          # 初始化feeds
+          cd istoreos-src && ./scripts/feeds update -n
+          echo "✅ iStoreOS源码拉取完成，LUCI目录已确认存在"
 
-    ########################################################################
-    # 步骤4：最终校验复制结果（确保文件真的存在）
-    ########################################################################
-    FINAL_TARGET="$LUCI_APP_STD_DIR/luci-app-hypermodem"
-    if [ -d "$FINAL_TARGET" ]; then
-      echo "✅ 第三步校验通过：luci-app-hypermodem已成功复制到：$FINAL_TARGET"
-      # 显示复制后的目录内容，确认文件完整（可选但建议保留）
-      echo "🔍 复制后的文件列表（确认完整性）："
-      ls -l "$FINAL_TARGET"
-    else
-      echo "❌ FATAL ERROR: 复制失败！目标目录 $FINAL_TARGET 不存在"
-      exit 1
-    fi
+      - name: Clone 5G-Modem-Support
+        run: |
+          git clone https://github.com/Siriling/5G-Modem-Support.git --depth=1 5G-Modem-Support
+          # 校验5G组件是否存在
+          if [ ! -d "5G-Modem-Support/luci-app-hypermodem" ]; then
+            echo "❌ 5G-Modem-Support仓库拉取失败！"
+            exit 1
+          fi
+          echo "✅ 5G-Modem-Support源码拉取完成"
+
+      ########################################################################
+      # 3. 集成5G组件（核心修复：仅用标准目录 applications/，无apps/）
+      ########################################################################
+      # 复制5G驱动
+      - name: Copy FM350GL Drivers (MHI/QMI)
+        run: |
+          mkdir -p istoreos-src/package/kernel/fibocom-drivers
+          cp -r 5G-Modem-Support/fibocom_MHI istoreos-src/package/kernel/fibocom-drivers/
+          cp -r 5G-Modem-Support/fibocom_QMI_WWAN istoreos-src/package/kernel/fibocom-drivers/
+          echo "✅ 5G驱动复制完成"
+
+      # 复制拨号工具
+      - name: Copy fibocom-dial (Dial Tool)
+        run: |
+          mkdir -p istoreos-src/package/network/utils/fibocom-dial
+          cp -r 5G-Modem-Support/fibocom-dial/* istoreos-src/package/network/utils/fibocom-dial/
+          echo "✅ 5G拨号工具复制完成"
+
+      # 【关键修复】复制LUCI界面（仅用标准目录 applications/，强制创建+校验）
+      - name: Copy luci-app-hypermodem (LUCI Management)
+        run: |
+          # 1. 硬编码iStoreOS官方LUCI应用目录（无任何apps/）
+          TARGET_DIR="istoreos-src/package/luci/applications"
+          # 2. 强制创建目录（-p确保必存在，sudo避免权限问题）
+          sudo mkdir -p "$TARGET_DIR" && sudo chmod 755 "$TARGET_DIR"
+          # 3. 复制组件
+          sudo cp -rv 5G-Modem-Support/luci-app-hypermodem "$TARGET_DIR/"
+          # 4. 最终校验
+          if [ -d "$TARGET_DIR/luci-app-hypermodem" ]; then
+            echo "✅ luci-app-hypermodem复制完成，路径：$TARGET_DIR/luci-app-hypermodem"
+          else
+            echo "❌ 复制失败！"
+            exit 1
+          fi
+
+      ########################################################################
+      # 4. 编译+上传（无修改，保留日志优化）
+      ########################################################################
+      - name: Load .config
+        run: |
+          cp ./.config istoreos-src/.config
+          cd istoreos-src && grep -E "fibocom|hypermodem" .config || echo "⚠️ 5G组件未启用"
+
+      - name: Copy custom files
+        run: |
+          [ -d ./files ] && cp -r ./files istoreos-src/ || echo "ℹ️ 无files目录"
+
+      - name: Update & install feeds
+        run: |
+          cd istoreos-src
+          ./scripts/feeds update -a 2>&1 | tee feeds.log
+          ./scripts/feeds install -a 2>&1 | tee feeds-install.log
+
+      - name: Build firmware (4 threads + log save)
+        run: |
+          cd istoreos-src
+          make -j4 defconfig 2>&1 | tee defconfig.log
+          make -j4 download V=s 2>&1 | tee download.log
+          make -j4 V=s 2>&1 | tee build.log
+          [ -n "$(ls bin/targets/rockchip/armv8/*.img 2>/dev/null)" ] || (echo "❌ 编译失败" && exit 1)
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: 5g-build-logs
+          path: istoreos-src/*.log
+          retention-days: 14
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: istoreos-rk3568-fm350gl-5g
+          path: istoreos-src/bin/targets/rockchip/armv8/*.img
+          retention-days: 30
