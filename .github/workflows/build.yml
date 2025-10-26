@@ -1,49 +1,58 @@
-# 【彻底修复】Copy LUCI管理界面（hypermodem）- 解决目录不存在问题
-- name: Copy LUCI management interface (luci-app-hypermodem)
+# 【终极修复】Copy LUCI管理界面（luci-app-hypermodem）- 彻底解决目录不存在问题
+- name: Copy 5G LUCI Management (luci-app-hypermodem)
   run: |
-    # 1. 定义iStoreOS LUCI应用的官方标准目录（关键：使用applications而非apps）
-    TARGET_DIR="istoreos-src/package/luci/applications"
-    
-    # 2. 先验证iStoreOS源码的LUCI目录是否存在（排查源码拉取是否正常）
+    ########################################################################
+    # 步骤1：验证iStoreOS源码是否拉取成功（根源排查）
+    ########################################################################
+    # 先确认iStoreOS的LUCI基础目录是否存在（若不存在，说明前序克隆步骤失败）
     if [ ! -d "istoreos-src/package/luci" ]; then
-      echo "❌ 错误：iStoreOS源码的LUCI目录（istoreos-src/package/luci）不存在！"
-      echo "请检查前序步骤中iStoreOS源码克隆是否成功（git clone istoreos）"
-      exit 1
+      echo "❌ FATAL ERROR: iStoreOS源码的LUCI核心目录缺失！"
+      echo "请检查「Clone iStoreOS source」步骤是否成功，正常应存在 istoreos-src/package/luci"
+      echo "当前目录结构（供排查）："
+      ls -l istoreos-src/package/  # 显示package目录下的文件，确认luci是否存在
+      exit 1  # 源码缺失，直接终止流程
     fi
-    echo "✅ iStoreOS LUCI基础目录已存在：istoreos-src/package/luci"
+    echo "✅ 第一步校验通过：iStoreOS LUCI核心目录（istoreos-src/package/luci）已存在"
+
+    ########################################################################
+    # 步骤2：强制创建LUCI应用标准目录（必成功）
+    ########################################################################
+    # 硬编码iStoreOS官方LUCI应用目录（绝对路径，避免相对路径错误）
+    LUCI_APP_STD_DIR="$(pwd)/istoreos-src/package/luci/applications"
+    # 强制创建目录（-p：自动创建所有不存在的父目录，权限755确保可写）
+    sudo mkdir -p "$LUCI_APP_STD_DIR" && sudo chmod 755 "$LUCI_APP_STD_DIR"
     
-    # 3. 强制创建目标目录（-p参数：即使父目录不存在也自动创建，避免“目录不存在”错误）
-    mkdir -p "$TARGET_DIR"
-    if [ -d "$TARGET_DIR" ]; then
-      echo "✅ 已成功创建LUCI应用目标目录：$TARGET_DIR"
+    # 校验目录是否创建成功
+    if [ -d "$LUCI_APP_STD_DIR" ]; then
+      echo "✅ 第二步校验通过：已创建LUCI应用标准目录：$LUCI_APP_STD_DIR"
     else
-      echo "❌ 无法创建目标目录：$TARGET_DIR（可能是权限问题）"
-      exit 1
-    fi
-    
-    # 4. 复制luci-app-hypermodem到标准目录
-    cp -r 5G-Modem-Support/luci-app-hypermodem "$TARGET_DIR/"
-    
-    # 5. 复制后校验（确保文件真的复制成功，避免静默失败）
-    if [ -d "$TARGET_DIR/luci-app-hypermodem" ]; then
-      echo "✅ luci-app-hypermodem 已成功复制到：$TARGET_DIR/luci-app-hypermodem"
-      # 可选：查看复制后的目录结构，确认文件完整性
-      echo "🔍 复制后的目录结构："
-      ls -l "$TARGET_DIR/luci-app-hypermodem"
-    else
-      echo "❌ luci-app-hypermodem 复制失败！目标目录中未找到该文件夹"
+      echo "❌ FATAL ERROR: 无法创建标准目录 $LUCI_APP_STD_DIR（可能是权限问题）"
       exit 1
     fi
 
-# （可选）若需要短信功能，添加以下步骤（同样使用标准目录）
-# - name: Copy SMS tool (luci-app-sms-tool)
-#   run: |
-#     TARGET_DIR="istoreos-src/package/luci/applications"
-#     mkdir -p "$TARGET_DIR"
-#     cp -r 5G-Modem-Support/luci-app-sms-tool "$TARGET_DIR/"
-#     if [ -d "$TARGET_DIR/luci-app-sms-tool" ]; then
-#       echo "✅ luci-app-sms-tool 复制完成"
-#     else
-#       echo "❌ luci-app-sms-tool 复制失败"
-#       exit 1
-#     fi
+    ########################################################################
+    # 步骤3：复制luci-app-hypermodem到标准目录
+    ########################################################################
+    # 先确认5G驱动仓库的hypermodem目录是否存在（避免仓库拉取失败）
+    if [ ! -d "5G-Modem-Support/luci-app-hypermodem" ]; then
+      echo "❌ FATAL ERROR: 5G-Modem-Support仓库中未找到luci-app-hypermodem目录！"
+      echo "请检查「Clone 5G-Modem-Support」步骤是否成功"
+      exit 1
+    fi
+
+    # 执行复制（-r：递归复制目录，-v：显示复制过程，方便排查）
+    sudo cp -rv 5G-Modem-Support/luci-app-hypermodem "$LUCI_APP_STD_DIR/"
+
+    ########################################################################
+    # 步骤4：最终校验复制结果（确保文件真的存在）
+    ########################################################################
+    FINAL_TARGET="$LUCI_APP_STD_DIR/luci-app-hypermodem"
+    if [ -d "$FINAL_TARGET" ]; then
+      echo "✅ 第三步校验通过：luci-app-hypermodem已成功复制到：$FINAL_TARGET"
+      # 显示复制后的目录内容，确认文件完整（可选但建议保留）
+      echo "🔍 复制后的文件列表（确认完整性）："
+      ls -l "$FINAL_TARGET"
+    else
+      echo "❌ FATAL ERROR: 复制失败！目标目录 $FINAL_TARGET 不存在"
+      exit 1
+    fi
