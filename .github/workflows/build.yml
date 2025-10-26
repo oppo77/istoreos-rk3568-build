@@ -27,7 +27,7 @@ jobs:
 
       - name: Load custom config
         run: |
-          cp ../.config istoreos-src/.config  # 复制我们的配置文件到源码目录
+          cp ./.config istoreos-src/.config  # 复制我们的配置文件到源码目录
 
       - name: Update and install feeds
         run: |
