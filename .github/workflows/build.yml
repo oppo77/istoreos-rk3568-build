@@ -27,22 +27,28 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      # 1. 准备阶段
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install Build Dependencies
         run: |
           sudo apt update
-          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev python3-distutils rsync unzip zlib1g-dev file wget curl
+          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib \
+          g++-multilib gettext git libncurses5-dev libncursesw5-dev libssl-dev \
+          libelf-dev python3-distutils rsync unzip zlib1g-dev file wget curl
 
-      - name: Clone iStoreOS source
+      # 2. 源码获取
+      - name: Clone iStoreOS Source
         run: |
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
 
-      - name: Load custom config
+      # 3. 基础配置
+      - name: Load Custom Configuration
         run: |
           cp ./.config istoreos-src/.config
 
+      # 4. FM350GL 5G模组配置
       - name: Configure FM350GL 5G Modem Support
         if: github.event.inputs.enable_fm350gl == 'true'
         run: |
@@ -80,7 +86,7 @@ CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
 CONFIG_PACKAGE_comgt-ncm=y
 CONFIG_PACKAGE_comgt=y
 
-# USB模式切换（FM350GL可能需要）
+# USB模式切换
 CONFIG_PACKAGE_usb-modeswitch=y
 CONFIG_PACKAGE_usb-modeswitch-data=y
 
@@ -94,17 +100,10 @@ CONFIG_PACKAGE_kmod-usb-dwc2=y
 CONFIG_PACKAGE_kmod-usb-dwc3=y
 CONFIG_PACKAGE_kmod-phy-rockchip-inno-usb2=y
 CONFIG_PACKAGE_kmod-phy-rockchip-naneng-combphy=y
-
-# 添加FM350GL特定的USB ID支持
-CONFIG_PACKAGE_kmod-usb-net-cdc-mbim_force_mbim=y
 EOF
-
           echo "FM350GL 5G模组配置已添加"
-          
-          # 验证配置
-          echo "FM350GL相关配置检查:"
-          grep -E "CONFIG_PACKAGE.*(mbim|qmi|usb-serial)" .config
 
+      # 5. WiFi配置
       - name: Configure WiFi Support
         if: github.event.inputs.enable_wifi == 'true'
         run: |
@@ -123,6 +122,7 @@ EOF
             package/kernel/mac80211/files/lib/wifi/mac80211.sh
           echo "WiFi已启用"
 
+      # 6. 网络配置
       - name: Set LAN IP Address
         if: github.event.inputs.lan_ip != ''
         run: |
@@ -133,18 +133,13 @@ EOF
           # 修改默认IP配置
           sed -i "s/192\.168\.[0-9]*\.[0-9]*/$LAN_IP/g" \
             package/base-files/files/bin/config_generate
-          
-          # 同时修改LUCI默认配置
-          if [ -f package/base-files/files/etc/config/network ]; then
-            sed -i "s/192\.168\.[0-9]*\.[0-9]*/$LAN_IP/g" \
-              package/base-files/files/etc/config/network
-          fi
 
-      - name: Add FM350GL specific patches
+      # 7. FM350GL特定补丁和脚本
+      - name: Add FM350GL Specific Patches
         if: github.event.inputs.enable_fm350gl == 'true'
         run: |
           cd istoreos-src
-          echo "添加FM350GL特定补丁和配置..."
+          echo "添加FM350GL特定配置..."
           
           # 创建FM350GL的USB模式切换规则
           mkdir -p files/etc/usb_modeswitch.d
@@ -152,13 +147,10 @@ EOF
 # Fibocom FM350-GL
 DefaultVendor=0x2c7c
 DefaultProduct=0x0801
-
 MessageEndpoint=0x05
 MessageContent="55534243123456780000000000000011062000000100000000000000000000"
-
 TargetVendor=0x2c7c
 TargetProduct=0x0801
-
 CheckSuccess=20
 EOF
 
@@ -167,9 +159,6 @@ EOF
           cat > files/etc/udev/rules.d/99-fm350gl.rules << 'EOF'
 # Fibocom FM350-GL MBIM mode
 SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0801", NAME="wwan0"
-
-# Fibocom FM350-GL QMI mode
-SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0801", NAME="wwan1"
 EOF
 
           # 创建FM350GL网络配置脚本
@@ -177,43 +166,40 @@ EOF
           cat > files/usr/bin/setup-fm350gl.sh << 'EOF'
 #!/bin/sh
 # FM350GL 5G模组设置脚本
-
 echo "设置广和通FM350GL 5G模组..."
-
-# 等待模组识别
 sleep 10
 
 # 检查MBIM接口
 if ls /dev/cdc-wdm* 1> /dev/null 2>&1; then
     echo "检测到MBIM接口，使用umbim连接"
-    # MBIM连接命令
     umbim -d /dev/cdc-wdm0 connect
 elif ls /dev/qmi* 1> /dev/null 2>&1; then
     echo "检测到QMI接口，使用uqmi连接"
-    # QMI连接命令
     uqmi -d /dev/qmi0 --set-data-format=raw-ip
     uqmi -d /dev/qmi0 --wda-set-data-format=raw-ip
 else
     echo "未检测到5G模组接口"
 fi
-
 echo "FM350GL设置完成"
 EOF
           chmod +x files/usr/bin/setup-fm350gl.sh
 
-      - name: Copy custom files
+      # 8. 自定义文件复制
+      - name: Copy Custom Files
         run: |
           if [ -d "./files" ]; then
             cp -r ./files istoreos-src/
           fi
 
-      - name: Update and install feeds
+      # 9. 软件包管理
+      - name: Update and Install Feeds
         run: |
           cd istoreos-src
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Build firmware
+      # 10. 编译阶段
+      - name: Build Firmware
         run: |
           cd istoreos-src
           echo "开始编译固件..."
@@ -222,13 +208,15 @@ EOF
           make -j$(nproc) V=s
           echo "固件编译完成"
 
-      - name: Upload firmware
+      # 11. 产物处理
+      - name: Upload Firmware Artifact
         uses: actions/upload-artifact@v4
         with:
           name: istoreos-rk3568-fm350gl-firmware
           path: istoreos-src/bin/targets/rockchip/armv8/*.img
 
-      - name: Generate build report
+      # 12. 构建报告
+      - name: Generate Build Report
         if: always()
         run: |
           echo "=== 构建报告 ==="
@@ -237,6 +225,7 @@ EOF
           echo "WiFi支持: ${{ github.event.inputs.enable_wifi == 'true' && '已启用' || '未启用' }}"
           echo "LAN IP: ${{ github.event.inputs.lan_ip || '192.168.10.1' }}"
           echo "构建时间: $(date +'%Y-%m-%d %H:%M:%S')"
+          echo ""
           echo "=== FM350GL使用说明 ==="
           echo "1. 插入FM350GL模组后等待系统识别"
           echo "2. 检查接口: ls /dev/cdc-wdm* 或 ls /dev/qmi*"
