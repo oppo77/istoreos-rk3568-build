@@ -1,4 +1,4 @@
-name: Build iStoreOS for RK3568 (Fixed FM350GL Drivers)
+name: Build iStoreOS for RK3568 (Keep 5G-Modem-Support Base)
 on:
   push:
     branches: [ main ]
@@ -10,6 +10,9 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
+      ########################################################################
+      # 1. 基础准备
+      ########################################################################
       - name: Checkout local config
         uses: actions/checkout@v4
 
@@ -21,142 +24,92 @@ jobs:
             libncursesw5-dev libssl-dev libelf-dev python3-distutils \
             rsync unzip zlib1g-dev file wget
 
+      ########################################################################
+      # 2. 拉取源码
+      ########################################################################
       - name: Clone iStoreOS source
         run: |
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=istoreos-24.10 istoreos-src
-          cd istoreos-src
-          # 检查内核版本
-          grep "LINUX_VERSION" include/kernel-version.mk || echo "内核版本信息获取失败"
+          echo "✅ iStoreOS源码拉取完成"
 
       - name: Clone 5G-Modem-Support
         run: |
           git clone https://github.com/Siriling/5G-Modem-Support.git --depth=1 5G-Modem-Support
-          # 检查驱动兼容性
-          ls -la 5G-Modem-Support/fibocom_MHI/
+          echo "✅ 5G-Modem-Support源码拉取完成"
 
       ########################################################################
-      # 修复驱动集成步骤
+      # 3. 仅集成5G基本组件（不包含FM350GL特定驱动）
       ########################################################################
-      - name: Check kernel compatibility
-        run: |
-          cd istoreos-src
-          # 获取当前内核版本
-          KERNEL_VER=$(grep "LINUX_VERSION=" include/kernel-version.mk | cut -d= -f2 | tr -d ' ')
-          echo "当前内核版本: $KERNEL_VER"
-          
-          # 检查驱动Makefile中的内核要求
-          if [ -f "../5G-Modem-Support/fibocom_MHI/Makefile" ]; then
-            echo "驱动Makefile内容:"
-            head -20 ../5G-Modem-Support/fibocom_MHI/Makefile
-          fi
-
-      - name: Apply driver patches if needed
-        run: |
-          # 检查是否需要为当前内核版本打补丁
-          cd 5G-Modem-Support
-          if [ -d "patches" ]; then
-            echo "发现驱动补丁目录"
-            ls -la patches/
-          else
-            echo "无补丁目录，尝试直接集成"
-          fi
-
-      - name: Copy drivers with compatibility check
+      - name: Copy basic 5G components
         run: |
           cd istoreos-src
           
-          # 创建驱动目录
-          mkdir -p package/kernel/fibocom-mhi
-          mkdir -p package/kernel/fibocom-qmi
-          
-          # 复制MHI驱动（先检查关键文件）
-          if [ -f "../5G-Modem-Support/fibocom_MHI/Makefile" ]; then
-            cp -r ../5G-Modem-Support/fibocom_MHI/* package/kernel/fibocom-mhi/
-            echo "MHI驱动复制完成"
-          else
-            echo "警告: fibocom_MHI驱动文件不全"
-            exit 1
-          fi
-          
-          # 复制QMI驱动
-          if [ -f "../5G-Modem-Support/fibocom_QMI_WWAN/Makefile" ]; then
-            cp -r ../5G-Modem-Support/fibocom_QMI_WWAN/* package/kernel/fibocom-qmi/
-            echo "QMI驱动复制完成"
-          fi
-
-      - name: Fix driver Makefiles
-        run: |
-          cd istoreos-src
-          
-          # 修复MHI驱动Makefile
-          if [ -f "package/kernel/fibocom-mhi/Makefile" ]; then
-            # 确保PKG_NAME正确
-            sed -i 's/PKG_NAME:=.*/PKG_NAME:=fibocom-mhi/' package/kernel/fibocom-mhi/Makefile
-            # 确保内核模块构建配置正确
-            sed -i 's/KBUILD_DIR:=.*/KBUILD_DIR:=$(LINUX_DIR)/' package/kernel/fibocom-mhi/Makefile
-            echo "MHI驱动Makefile修复完成"
-          fi
-          
-          # 修复QMI驱动Makefile
-          if [ -f "package/kernel/fibocom-qmi/Makefile" ]; then
-            sed -i 's/PKG_NAME:=.*/PKG_NAME:=fibocom-qmi/' package/kernel/fibocom-qmi/Makefile
-            sed -i 's/KBUILD_DIR:=.*/KBUILD_DIR:=$(LINUX_DIR)/' package/kernel/fibocom-qmi/Makefile
-            echo "QMI驱动Makefile修复完成"
-          fi
-
-      # 复制其他组件（保持不变）
-      - name: Copy dial tools and LUCI
-        run: |
-          cd istoreos-src
-          mkdir -p package/network/utils/fibocom-dial
-          cp -r ../5G-Modem-Support/fibocom-dial/* package/network/utils/fibocom-dial/
-          
+          # 创建基础目录结构
           mkdir -p package/luci/applications
-          cp -r ../5G-Modem-Support/luci-app-hypermodem package/luci/applications/
+          
+          # 仅复制通用的5G管理界面（如果存在）
+          if [ -d "../5G-Modem-Support/luci-app-hypermodem" ]; then
+            cp -r ../5G-Modem-Support/luci-app-hypermodem package/luci/applications/
+            echo "✅ 已集成通用5G管理界面"
+          fi
+          
+          # 启用标准USB网络支持（适用于多种5G模块）
+          echo "CONFIG_PACKAGE_kmod-usb-net=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-usb-net-rndis=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-usb-net-cdc-mbim=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-usb-serial=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-usb-serial-option=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-usb-serial-wwan=y" >> .config
 
       ########################################################################
-      # 详细编译调试
+      # 4. 配置编译环境
       ########################################################################
-      - name: Copy config
+      - name: Copy config and custom files
         run: |
-          cp .config istoreos-src/.config
-          cd istoreos-src
-          echo "检查5G驱动配置:"
-          grep -E "CONFIG_PACKAGE_kmod-fibocom|CONFIG_PACKAGE_fibocom" .config || echo "未找到5G驱动配置"
+          # 复制配置文件
+          if [ -f .config ]; then
+            cp .config istoreos-src/.config
+            echo "✅ 使用自定义配置"
+          else
+            echo "ℹ️ 使用默认配置"
+          fi
+          
+          # 复制自定义文件（如果有）
+          if [ -d ./files ]; then
+            cp -r ./files istoreos-src/
+            echo "✅ 复制自定义文件"
+          fi
 
-      - name: Update feeds with debug
+      - name: Update and install feeds
         run: |
           cd istoreos-src
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # 检查驱动是否被正确识别
-          ./scripts/feeds list | grep fibocom || echo "驱动未在feeds中"
+          echo "✅ Feeds更新完成"
 
-      - name: Test driver compilation separately
-        run: |
-          cd istoreos-src
-          # 先尝试单独编译驱动（如果失败会提前退出）
-          make package/kernel/fibocom-mhi/compile V=s 2>&1 | tee driver_compile.log || {
-            echo "驱动单独编译失败，检查日志:"
-            tail -50 driver_compile.log
-            exit 1
-          }
-
-      - name: Full build with detailed logging
+      ########################################################################
+      # 5. 编译固件
+      ########################################################################
+      - name: Build firmware
         run: |
           cd istoreos-src
           make defconfig
           make download
-          # 使用单线程编译以便更好的错误诊断
-          make -j1 V=sc 2>&1 | tee full_build.log || {
-            echo "编译失败，最后50行日志:"
-            tail -50 full_build.log
-            # 检查具体错误
-            grep -A5 -B5 "error:" full_build.log | head -100
-            exit 1
-          }
+          make -j$(nproc) V=s
+          echo "✅ 编译完成"
 
-      - name: Upload build artifacts
+      ########################################################################
+      # 6. 上传产物
+      ########################################################################
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: istoreos-rk3568-firmware
+          path: istoreos-src/bin/targets/rockchip/armv8/*.img
+          retention-days: 30
+
+      - name: Upload build logs
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
@@ -164,11 +117,3 @@ jobs:
             istoreos-src/*.log
             istoreos-src/.config
           retention-days: 7
-
-      - name: Upload firmware
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware
-          path: istoreos-src/bin/targets/rockchip/armv8/*.img
-          retention-days: 30
