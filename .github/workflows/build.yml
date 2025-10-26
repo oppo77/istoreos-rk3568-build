@@ -25,76 +25,81 @@ jobs:
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
           cd istoreos-src
 
-      - name: 清理旧feeds配置并重建基础源
+      - name: 彻底重建feeds配置（仅保留本地源和基础源）
         run: |
           cd istoreos-src
-          rm -f feeds.conf.default
+          # 完全清空原feeds配置
+          echo "" > feeds.conf.default
+          # 只添加iStoreOS必要的基础源（避免自带的冲突）
           echo "src-git base https://github.com/openwrt/openwrt.git;openwrt-22.03" >> feeds.conf.default
           echo "src-git packages https://github.com/openwrt/packages.git;openwrt-22.03" >> feeds.conf.default
           echo "src-git luci https://github.com/openwrt/luci.git;openwrt-22.03" >> feeds.conf.default
-          echo "src-git routing https://github.com/openwrt/routing.git;openwrt-22.03" >> feeds.conf.default
-          echo "src-git telephony https://github.com/openwrt/telephony.git;openwrt-22.03" >> feeds.conf.default
-
-      - name: 通过ZIP包下载QWRT和Quectel仓库（无认证）
-        run: |
-          cd istoreos-src
-          mkdir -p feeds/qwrt feeds/quectel
-          
-          # 下载QWRT仓库ZIP包并解压
-          wget -O qwrt.zip https://github.com/qwrt-project/qwrt-packages/archive/refs/heads/main.zip
-          unzip -q qwrt.zip -d feeds/
-          # 解压后文件夹名为qwrt-packages-main，重命名为qwrt
-          mv feeds/qwrt-packages-main/* feeds/qwrt/
-          rm -rf feeds/qwrt-packages-main qwrt.zip
-          
-          # 下载Quectel仓库ZIP包并解压
-          wget -O quectel.zip https://github.com/quectel/quectel-openwrt/archive/refs/heads/master.zip
-          unzip -q quectel.zip -d feeds/
-          # 解压后文件夹名为quectel-openwrt-master，重命名为quectel
-          mv feeds/quectel-openwrt-master/* feeds/quectel/
-          rm -rf feeds/quectel-openwrt-master quectel.zip
-          
-          # 关联本地feeds
+          # 关键：只添加本地目录关联，不包含任何网络URL
           echo "src-link qwrt feeds/qwrt" >> feeds.conf.default
           echo "src-link quectel feeds/quectel" >> feeds.conf.default
 
-      - name: Load custom config
+      - name: 通过ZIP包下载并部署本地feeds（确保无网络依赖）
+        run: |
+          cd istoreos-src
+          # 创建本地feeds目录
+          mkdir -p feeds/qwrt feeds/quectel
+          
+          # 下载并部署QWRT（本地目录）
+          wget -t 3 -O qwrt.zip https://github.com/qwrt-project/qwrt-packages/archive/refs/heads/main.zip  # 重试3次
+          unzip -q qwrt.zip
+          mv qwrt-packages-main/* feeds/qwrt/
+          rm -rf qwrt-packages-main qwrt.zip
+          
+          # 下载并部署Quectel（本地目录）
+          wget -t 3 -O quectel.zip https://github.com/quectel/quectel-openwrt/archive/refs/heads/master.zip
+          unzip -q quectel.zip
+          mv quectel-openwrt-master/* feeds/quectel/
+          rm -rf quectel-openwrt-master quectel.zip
+          
+          # 验证本地feeds是否存在
+          echo "QWRT feeds内容："
+          ls -la feeds/qwrt
+          echo "Quectel feeds内容："
+          ls -la feeds/quectel
+
+      - name: 强制添加5G模组配置（避免.config冲突）
         run: |
           cp ./.config istoreos-src/.config
           cd istoreos-src
-          # 确保5G模组必要配置
-          echo "CONFIG_PACKAGE_kmod-usb-serial=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-usb-serial-qcserial=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-qmi-wwan=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y" >> .config
-          echo "CONFIG_PACKAGE_modemmanager=y" >> .config
-          echo "CONFIG_PACKAGE_modemmanager-ppp=y" >> .config
-          echo "CONFIG_PACKAGE_luci-proto-qmi=y" >> .config
-          echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
-          echo "CONFIG_PACKAGE_uqmi=y" >> .config
-          echo "CONFIG_PACKAGE_qwrt-modem=y" >> .config
-          echo "CONFIG_PACKAGE_qwrt-modem-quectel=y" >> .config
+          # 用sed强制确保配置项存在（覆盖可能的冲突）
+          sed -i '/CONFIG_PACKAGE_kmod-usb-serial/d' .config && echo "CONFIG_PACKAGE_kmod-usb-serial=y" >> .config
+          sed -i '/CONFIG_PACKAGE_kmod-usb-serial-qcserial/d' .config && echo "CONFIG_PACKAGE_kmod-usb-serial-qcserial=y" >> .config
+          sed -i '/CONFIG_PACKAGE_kmod-qmi-wwan/d' .config && echo "CONFIG_PACKAGE_kmod-qmi-wwan=y" >> .config
+          sed -i '/CONFIG_PACKAGE_kmod-usb-net-qmi-wwan/d' .config && echo "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y" >> .config
+          sed -i '/CONFIG_PACKAGE_modemmanager/d' .config && echo "CONFIG_PACKAGE_modemmanager=y" >> .config
+          sed -i '/CONFIG_PACKAGE_modemmanager-ppp/d' .config && echo "CONFIG_PACKAGE_modemmanager-ppp=y" >> .config
+          sed -i '/CONFIG_PACKAGE_luci-proto-qmi/d' .config && echo "CONFIG_PACKAGE_luci-proto-qmi=y" >> .config
+          sed -i '/CONFIG_PACKAGE_qmi-utils/d' .config && echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
+          sed -i '/CONFIG_PACKAGE_uqmi/d' .config && echo "CONFIG_PACKAGE_uqmi=y" >> .config
+          sed -i '/CONFIG_PACKAGE_qwrt-modem/d' .config && echo "CONFIG_PACKAGE_qwrt-modem=y" >> .config
+          sed -i '/CONFIG_PACKAGE_qwrt-modem-quectel/d' .config && echo "CONFIG_PACKAGE_qwrt-modem-quectel=y" >> .config
 
-      - name: Copy custom files
+      - name: 复制自定义设备配置
         run: |
-          cp -r ./files istoreos-src/
+          cp -r ./files istoreos-src/ 2>/dev/null || true  # 忽略无files目录的错误
           mkdir -p istoreos-src/files/etc/modprobe.d/
           echo "options qcserial vendor=0x05c6 product=0x90b2" > istoreos-src/files/etc/modprobe.d/fm35ogl.conf
 
-      - name: Update and install feeds
+      - name: 更新并安装feeds（仅本地+基础源）
         run: |
           cd istoreos-src
+          # 此时qwrt和quectel已通过src-link指向本地，update不会触发网络克隆
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Build firmware
+      - name: 编译固件
         run: |
           cd istoreos-src
           make -j$(nproc) defconfig
           make -j$(nproc) download V=s
           make -j$(nproc) V=s
 
-      - name: Upload firmware
+      - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
           name: istoreos-rk3568-5g-firmware
