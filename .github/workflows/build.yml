@@ -25,21 +25,27 @@ jobs:
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
           cd istoreos-src
 
-      - name: Add QWRT 5G support feeds (SSH protocol)
+      - name: Manual clone QWRT and Quectel feeds (bypass HTTPS auth issue)
         run: |
           cd istoreos-src
-          # 关键修改：将 HTTPS 链接替换为 SSH 链接，避免认证问题
-          echo "src-git qwrt git@github.com:qwrt-project/qwrt-packages.git" >> feeds.conf.default
-          echo "src-git quectel git@github.com:quectel/quectel-openwrt.git" >> feeds.conf.default
+          # 创建feeds目录（如果不存在）
+          mkdir -p feeds/qwrt feeds/quectel
+          # 手动克隆QWRT仓库（使用HTTPS，强制公开访问）
+          git clone https://github.com/qwrt-project/qwrt-packages.git --depth=1 feeds/qwrt
+          # 手动克隆广和通仓库
+          git clone https://github.com/quectel/quectel-openwrt.git --depth=1 feeds/quectel
+          # 确保feeds配置中包含这两个仓库（避免后续脚本忽略）
+          echo "src-link qwrt feeds/qwrt" >> feeds.conf.default
+          echo "src-link quectel feeds/quectel" >> feeds.conf.default
 
       - name: Load custom config
         run: |
           cp ./.config istoreos-src/.config
           cd istoreos-src
-          # 确保必要的5G模组配置
+          # 确保5G模组必要配置
           echo "CONFIG_PACKAGE_kmod-usb-serial=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-usb-serial-qcserial=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-qmi-wwan=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-usb-serial-qcserial=y" >> .config  # 高通串口驱动
+          echo "CONFIG_PACKAGE_kmod-qmi-wwan=y" >> .config  # QMI协议
           echo "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y" >> .config
           echo "CONFIG_PACKAGE_modemmanager=y" >> .config
           echo "CONFIG_PACKAGE_modemmanager-ppp=y" >> .config
@@ -53,13 +59,13 @@ jobs:
         run: |
           cp -r ./files istoreos-src/
           mkdir -p istoreos-src/files/etc/modprobe.d/
-          echo "options qcserial vendor=0x05c6 product=0x90b2" > istoreos-src/files/etc/modprobe.d/fm35ogl.conf
+          echo "options qcserial vendor=0x05c6 product=0x90b2" > istoreos-src/files/etc/modprobe.d/fm35ogl.conf  # FM35OGL的VID/PID
 
-      - name: Update and install feeds
+      - name: Update and install feeds (with manual clones)
         run: |
           cd istoreos-src
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          ./scripts/feeds update -a  # 此时qwrt和quectel已手动克隆，仅更新其他源
+          ./scripts/feeds install -a  # 安装所有包（包括手动克隆的）
 
       - name: Build firmware
         run: |
