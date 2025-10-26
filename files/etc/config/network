@@ -1,0 +1,39 @@
+config interface 'loopback'
+    option device 'lo'
+    option proto 'static'
+    option ipaddr '127.0.0.1'
+    option netmask '255.0.0.0'
+
+config globals 'globals'
+    option ula_prefix 'fd06:b68a:4a6d::/48'
+
+# 有线网口（默认配置，保留）
+config device
+    option name 'br-lan'
+    option type 'bridge'
+    list ports 'lan1'  # 对应第一个RTL8211F网口
+    list ports 'lan2'  # 对应第二个RTL8211F网口
+
+config interface 'lan'
+    option device 'br-lan'
+    option proto 'static'
+    option ipaddr '192.168.1.1'  # 路由器管理IP
+    option netmask '255.255.255.0'
+    option ip6assign '60'
+
+# 5G模块接口（核心配置）
+config interface 'wwan'
+    option proto 'qmi'  # 使用QMI协议（350GL模块常用）
+    option device '/dev/cdc-wdm0'  # 5G模块的QMI设备路径（通常是这个）
+    option apn 'cmnet'  # APN（中国移动：cmnet；联通：3gnet；电信：ctnet，根据你的卡调整）
+    option pincode ''  # SIM卡PIN码（无则留空）
+    option auth 'none'  # 认证方式（多数无需认证）
+    option dhcp 'auto'  # 自动获取IP
+    option auto '1'  # 开机自动启用
+
+# 可选：将5G设为默认网关（如果需要通过5G上网）
+config route
+    option interface 'wwan'
+    option target '0.0.0.0'
+    option netmask '0.0.0.0'
+    option metric '10'  # 优先级（低于有线，如需优先5G可设为5）
