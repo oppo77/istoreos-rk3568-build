@@ -1,0 +1,37 @@
+# MT7916无线设备配置（5G频段）
+config wifi-device 'radio0'
+    option type 'mac80211'
+    option path 'pci0000:00/0000:00:00.0'  # MT7916的PCIe路径（根据实际硬件调整，可留空自动识别）
+    option channel '36'  # 5G信道（36-64为低信道，149-165为高信道）
+    option band '5g'  # 5G频段
+    option htmode 'HE80'  # 支持80MHz频宽（高速率）
+    option country 'CN'  # 地区（中国）
+    option disabled '0'  # 0=启用（关键：默认开启）
+
+# 5G WiFi热点配置
+config wifi-iface 'default_radio0'
+    option device 'radio0'
+    option network 'lan'  # 关联到lan网络（共享管理IP）
+    option mode 'ap'  # 接入点模式
+    option ssid 'iStoreOS-5G'  # WiFi名称（自定义）
+    option encryption 'sae-mixed'  # 加密方式（WPA3/WPA2混合）
+    option key '12345678'  # WiFi密码（至少8位）
+    option ieee80211w '1'  # 启用管理帧保护（增强安全）
+
+# 可选：2.4G频段配置（如果MT7916支持）
+config wifi-device 'radio1'
+    option type 'mac80211'
+    option path 'pci0000:00/0000:00:01.0'  # 2.4G路径（自动识别或调整）
+    option channel '6'  # 2.4G信道
+    option band '2g'
+    option htmode 'HT40'  # 40MHz频宽
+    option country 'CN'
+    option disabled '0'  # 启用2.4G
+
+config wifi-iface 'default_radio1'
+    option device 'radio1'
+    option network 'lan'
+    option mode 'ap'
+    option ssid 'iStoreOS-2.4G'
+    option encryption 'sae-mixed'
+    option key '12345678'
