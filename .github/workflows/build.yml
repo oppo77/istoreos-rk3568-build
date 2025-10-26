@@ -25,48 +25,44 @@ jobs:
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
           cd istoreos-src
 
-      - name: 彻底重建feeds配置（仅保留本地源和基础源）
+      - name: 清除所有默认feeds配置（避免自动添加网络源）
         run: |
           cd istoreos-src
-          # 完全清空原feeds配置
-          echo "" > feeds.conf.default
-          # 只添加iStoreOS必要的基础源（避免自带的冲突）
+          # 直接清空feeds配置文件，只保留必要的基础源
+          > feeds.conf.default
           echo "src-git base https://github.com/openwrt/openwrt.git;openwrt-22.03" >> feeds.conf.default
           echo "src-git packages https://github.com/openwrt/packages.git;openwrt-22.03" >> feeds.conf.default
           echo "src-git luci https://github.com/openwrt/luci.git;openwrt-22.03" >> feeds.conf.default
-          # 关键：只添加本地目录关联，不包含任何网络URL
-          echo "src-link qwrt feeds/qwrt" >> feeds.conf.default
-          echo "src-link quectel feeds/quectel" >> feeds.conf.default
 
-      - name: 通过ZIP包下载并部署本地feeds（确保无网络依赖）
+      - name: 本地部署QWRT和Quectel包（完全脱离feeds网络依赖）
         run: |
           cd istoreos-src
-          # 创建本地feeds目录
-          mkdir -p feeds/qwrt feeds/quectel
+          # 创建本地包目录（直接放在package目录下，OpenWRT会自动识别）
+          mkdir -p package/qwrt package/quectel
           
-          # 下载并部署QWRT（本地目录）
-          wget -t 3 -O qwrt.zip https://github.com/qwrt-project/qwrt-packages/archive/refs/heads/main.zip  # 重试3次
+          # 下载QWRT包并解压到package/qwrt
+          wget -t 3 -O qwrt.zip https://github.com/qwrt-project/qwrt-packages/archive/refs/heads/main.zip
           unzip -q qwrt.zip
-          mv qwrt-packages-main/* feeds/qwrt/
+          mv qwrt-packages-main/* package/qwrt/
           rm -rf qwrt-packages-main qwrt.zip
           
-          # 下载并部署Quectel（本地目录）
+          # 下载Quectel包并解压到package/quectel
           wget -t 3 -O quectel.zip https://github.com/quectel/quectel-openwrt/archive/refs/heads/master.zip
           unzip -q quectel.zip
-          mv quectel-openwrt-master/* feeds/quectel/
+          mv quectel-openwrt-master/* package/quectel/
           rm -rf quectel-openwrt-master quectel.zip
           
-          # 验证本地feeds是否存在
-          echo "QWRT feeds内容："
-          ls -la feeds/qwrt
-          echo "Quectel feeds内容："
-          ls -la feeds/quectel
+          # 验证本地包是否部署成功
+          echo "QWRT本地包内容："
+          ls -la package/qwrt
+          echo "Quectel本地包内容："
+          ls -la package/quectel
 
-      - name: 强制添加5G模组配置（避免.config冲突）
+      - name: 强制添加5G模组配置
         run: |
           cp ./.config istoreos-src/.config
           cd istoreos-src
-          # 用sed强制确保配置项存在（覆盖可能的冲突）
+          # 确保必要组件配置
           sed -i '/CONFIG_PACKAGE_kmod-usb-serial/d' .config && echo "CONFIG_PACKAGE_kmod-usb-serial=y" >> .config
           sed -i '/CONFIG_PACKAGE_kmod-usb-serial-qcserial/d' .config && echo "CONFIG_PACKAGE_kmod-usb-serial-qcserial=y" >> .config
           sed -i '/CONFIG_PACKAGE_kmod-qmi-wwan/d' .config && echo "CONFIG_PACKAGE_kmod-qmi-wwan=y" >> .config
@@ -76,20 +72,22 @@ jobs:
           sed -i '/CONFIG_PACKAGE_luci-proto-qmi/d' .config && echo "CONFIG_PACKAGE_luci-proto-qmi=y" >> .config
           sed -i '/CONFIG_PACKAGE_qmi-utils/d' .config && echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
           sed -i '/CONFIG_PACKAGE_uqmi/d' .config && echo "CONFIG_PACKAGE_uqmi=y" >> .config
+          # 直接引用本地package目录下的包
           sed -i '/CONFIG_PACKAGE_qwrt-modem/d' .config && echo "CONFIG_PACKAGE_qwrt-modem=y" >> .config
           sed -i '/CONFIG_PACKAGE_qwrt-modem-quectel/d' .config && echo "CONFIG_PACKAGE_qwrt-modem-quectel=y" >> .config
 
       - name: 复制自定义设备配置
         run: |
-          cp -r ./files istoreos-src/ 2>/dev/null || true  # 忽略无files目录的错误
+          cp -r ./files istoreos-src/ 2>/dev/null || true
           mkdir -p istoreos-src/files/etc/modprobe.d/
           echo "options qcserial vendor=0x05c6 product=0x90b2" > istoreos-src/files/etc/modprobe.d/fm35ogl.conf
 
-      - name: 更新并安装feeds（仅本地+基础源）
+      - name: 更新基础feeds并安装所有包（不含网络源）
         run: |
           cd istoreos-src
-          # 此时qwrt和quectel已通过src-link指向本地，update不会触发网络克隆
-          ./scripts/feeds update -a
+          # 只更新基础源（不涉及qwrt/quectel）
+          ./scripts/feeds update base packages luci
+          # 安装基础包+本地package目录下的包（无需更新qwrt/quectel，因为已在本地）
           ./scripts/feeds install -a
 
       - name: 编译固件
