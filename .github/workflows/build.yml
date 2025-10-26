@@ -25,42 +25,62 @@ jobs:
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
           cd istoreos-src
 
-      - name: 清理所有自定义源（仅保留默认源）
+      - name: 彻底删除源码中硬编码的qwrt/quectel源（关键步骤）
         run: |
           cd istoreos-src
-          # 恢复iStoreOS默认feeds配置，不添加任何第三方源
-          git checkout feeds.conf.default  # 用源码自带的默认配置
+          # 搜索并删除所有包含qwrt和quectel源的配置文件
+          # 检查feeds.conf.default是否被硬编码
+          sed -i '/qwrt-project\/qwrt-packages/d' feeds.conf.default
+          sed -i '/quectel\/quectel-openwrt/d' feeds.conf.default
+          # 检查scripts/feeds脚本是否自动添加源（如有）
+          sed -i '/qwrt-project\/qwrt-packages/d' scripts/feeds
+          sed -i '/quectel\/quectel-openwrt/d' scripts/feeds
+          # 检查其他可能的配置文件（如include/feeds.mk等）
+          find . -type f -exec sed -i '/qwrt-project\/qwrt-packages/d' {} +
+          find . -type f -exec sed -i '/quectel\/quectel-openwrt/d' {} +
+          # 确认清理结果
+          echo "清理后feeds.conf.default内容："
+          cat feeds.conf.default
 
-      - name: Load custom config (仅依赖默认组件)
+      - name: 仅保留默认源，确保无第三方源
+        run: |
+          cd istoreos-src
+          # 强制覆盖为纯净的默认源配置
+          > feeds.conf.default
+          echo "src-git base https://github.com/openwrt/openwrt.git;openwrt-22.03" >> feeds.conf.default
+          echo "src-git packages https://github.com/openwrt/packages.git;openwrt-22.03" >> feeds.conf.default
+          echo "src-git luci https://github.com/openwrt/luci.git;openwrt-22.03" >> feeds.conf.default
+          echo "src-git routing https://github.com/openwrt/routing.git;openwrt-22.03" >> feeds.conf.default
+          echo "src-git telephony https://github.com/openwrt/telephony.git;openwrt-22.03" >> feeds.conf.default
+
+      - name: 配置FM35OGL所需的默认组件
         run: |
           cp ./.config istoreos-src/.config
           cd istoreos-src
-          # 强制启用FM35OGL所需的核心组件（均来自OpenWRT默认源）
+          # 仅依赖OpenWRT默认源中的组件
           sed -i '/CONFIG_PACKAGE_kmod-usb-serial/d' .config && echo "CONFIG_PACKAGE_kmod-usb-serial=y" >> .config
-          sed -i '/CONFIG_PACKAGE_kmod-usb-serial-qcserial/d' .config && echo "CONFIG_PACKAGE_kmod-usb-serial-qcserial=y" >> .config  # 高通串口驱动（FM35OGL核心依赖）
-          sed -i '/CONFIG_PACKAGE_kmod-qmi-wwan/d' .config && echo "CONFIG_PACKAGE_kmod-qmi-wwan=y" >> .config  # QMI协议驱动
+          sed -i '/CONFIG_PACKAGE_kmod-usb-serial-qcserial/d' .config && echo "CONFIG_PACKAGE_kmod-usb-serial-qcserial=y" >> .config  # 高通串口驱动
+          sed -i '/CONFIG_PACKAGE_kmod-qmi-wwan/d' .config && echo "CONFIG_PACKAGE_kmod-qmi-wwan=y" >> .config  # QMI协议
           sed -i '/CONFIG_PACKAGE_kmod-usb-net-qmi-wwan/d' .config && echo "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y" >> .config
-          sed -i '/CONFIG_PACKAGE_modemmanager/d' .config && echo "CONFIG_PACKAGE_modemmanager=y" >> .config  # 调制解调器管理
+          sed -i '/CONFIG_PACKAGE_modemmanager/d' .config && echo "CONFIG_PACKAGE_modemmanager=y" >> .config
           sed -i '/CONFIG_PACKAGE_modemmanager-ppp/d' .config && echo "CONFIG_PACKAGE_modemmanager-ppp=y" >> .config
-          sed -i '/CONFIG_PACKAGE_luci-proto-qmi/d' .config && echo "CONFIG_PACKAGE_luci-proto-qmi=y" >> .config  # LuCI配置界面
-          sed -i '/CONFIG_PACKAGE_qmi-utils/d' .config && echo "CONFIG_PACKAGE_qmi-utils=y" >> .config  # QMI调试工具
-          sed -i '/CONFIG_PACKAGE_uqmi/d' .config && echo "CONFIG_PACKAGE_uqmi=y" >> .config  # 轻量QMI客户端
-          sed -i '/CONFIG_PACKAGE_luci-app-modemmanager/d' .config && echo "CONFIG_PACKAGE_luci-app-modemmanager=y" >> .config  # 图形化管理界面
+          sed -i '/CONFIG_PACKAGE_luci-proto-qmi/d' .config && echo "CONFIG_PACKAGE_luci-proto-qmi=y" >> .config
+          sed -i '/CONFIG_PACKAGE_qmi-utils/d' .config && echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
+          sed -i '/CONFIG_PACKAGE_uqmi/d' .config && echo "CONFIG_PACKAGE_uqmi=y" >> .config
+          sed -i '/CONFIG_PACKAGE_luci-app-modemmanager/d' .config && echo "CONFIG_PACKAGE_luci-app-modemmanager=y" >> .config  # 图形界面
 
-      - name: 配置FM35OGL专用识别规则
+      - name: 添加FM35OGL硬件识别规则
         run: |
           cd istoreos-src
-          # 添加模组USB VID/PID识别（确保系统正确识别硬件）
           mkdir -p files/etc/udev/rules.d/
           echo 'SUBSYSTEM=="tty", ATTRS{idVendor}=="05c6", ATTRS{idProduct}=="90b2", SYMLINK+="ttyUSB_FM35OGL", MODE="0666"' > files/etc/udev/rules.d/99-fm35ogl.rules
-          # 配置modprobe加载参数
           mkdir -p files/etc/modprobe.d/
           echo "options qcserial vendor=0x05c6 product=0x90b2" > files/etc/modprobe.d/fm35ogl.conf
 
-      - name: 更新并安装默认feeds（无第三方源，避免冲突）
+      - name: 更新默认源并安装组件
         run: |
           cd istoreos-src
-          ./scripts/feeds update -a  # 仅更新iStoreOS默认源
+          ./scripts/feeds update -a  # 此时已无qwrt/quectel源，不会触发错误
           ./scripts/feeds install -a
 
       - name: 编译固件
