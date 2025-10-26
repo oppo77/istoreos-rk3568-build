@@ -1,4 +1,4 @@
-name: Build iStoreOS for RK3568 (Keep 5G-Modem-Support Base)
+name: Build iStoreOS for RK3568 (Simplified Stable Version)
 on:
   push:
     branches: [ main ]
@@ -8,112 +8,38 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest  # 使用最新的Ubuntu版本
     steps:
-      ########################################################################
-      # 1. 基础准备
-      ########################################################################
-      - name: Checkout local config
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Setup environment
         run: |
           sudo apt update
-          sudo apt install -y build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses5-dev \
-            libncursesw5-dev libssl-dev libelf-dev python3-distutils \
-            rsync unzip zlib1g-dev file wget
+          sudo apt install -y build-essential ccache ecj fastjar file g++ gawk \
+            gettext git java-propose-classpath libelf-dev libncurses5-dev \
+            libncursesw5-dev libssl-dev python3 python3-distutils python3-setuptools \
+            python3-pip python3-ply python3-yaml unzip wget rsync subversion \
+            zlib1g-dev cmake curl libxml2-utils xsltproc
 
-      ########################################################################
-      # 2. 拉取源码
-      ########################################################################
-      - name: Clone iStoreOS source
+      - name: Clone iStoreOS
         run: |
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=istoreos-24.10 istoreos-src
-          echo "✅ iStoreOS源码拉取完成"
 
       - name: Clone 5G-Modem-Support
         run: |
           git clone https://github.com/Siriling/5G-Modem-Support.git --depth=1 5G-Modem-Support
-          echo "✅ 5G-Modem-Support源码拉取完成"
 
-      ########################################################################
-      # 3. 仅集成5G基本组件（不包含FM350GL特定驱动）
-      ########################################################################
-      - name: Copy basic 5G components
+      - name: Basic setup
         run: |
           cd istoreos-src
-          
-          # 创建基础目录结构
-          mkdir -p package/luci/applications
-          
-          # 仅复制通用的5G管理界面（如果存在）
-          if [ -d "../5G-Modem-Support/luci-app-hypermodem" ]; then
-            cp -r ../5G-Modem-Support/luci-app-hypermodem package/luci/applications/
-            echo "✅ 已集成通用5G管理界面"
-          fi
-          
-          # 启用标准USB网络支持（适用于多种5G模块）
-          echo "CONFIG_PACKAGE_kmod-usb-net=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-usb-net-rndis=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-usb-net-cdc-mbim=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-usb-serial=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-usb-serial-option=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-usb-serial-wwan=y" >> .config
-
-      ########################################################################
-      # 4. 配置编译环境
-      ########################################################################
-      - name: Copy config and custom files
-        run: |
-          # 复制配置文件
-          if [ -f .config ]; then
-            cp .config istoreos-src/.config
-            echo "✅ 使用自定义配置"
-          else
-            echo "ℹ️ 使用默认配置"
-          fi
-          
-          # 复制自定义文件（如果有）
-          if [ -d ./files ]; then
-            cp -r ./files istoreos-src/
-            echo "✅ 复制自定义文件"
-          fi
-
-      - name: Update and install feeds
-        run: |
-          cd istoreos-src
+          [ -f ../.config ] && cp ../.config .config || true
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          echo "✅ Feeds更新完成"
 
-      ########################################################################
-      # 5. 编译固件
-      ########################################################################
-      - name: Build firmware
+      - name: Build with minimal flags
         run: |
           cd istoreos-src
           make defconfig
           make download
-          make -j$(nproc) V=s
-          echo "✅ 编译完成"
-
-      ########################################################################
-      # 6. 上传产物
-      ########################################################################
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: istoreos-rk3568-firmware
-          path: istoreos-src/bin/targets/rockchip/armv8/*.img
-          retention-days: 30
-
-      - name: Upload build logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            istoreos-src/*.log
-            istoreos-src/.config
-          retention-days: 7
+          make -j2
