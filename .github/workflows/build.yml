@@ -14,16 +14,15 @@ jobs:
       # 1. 基础准备：拉取仓库代码 + 安装依赖（原逻辑不变）
       ########################################################################
       - name: Checkout 本地配置（含.config和自定义files）
-        uses: actions/checkout@v4  # 拉取当前仓库（需包含.config和files目录）
+        uses: actions/checkout@v4
 
-      - name: Install build dependencies（编译依赖，含内核驱动编译所需）
+      - name: Install build dependencies（编译依赖）
         run: |
           sudo apt update
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
             python3-distutils rsync unzip zlib1g-dev file wget linux-headers-$(uname -r)
-          # linux-headers确保FM350GL驱动编译正常
 
       ########################################################################
       # 2. 拉取核心源码：iStoreOS + 5G-Modem-Support（原逻辑不变）
@@ -37,10 +36,9 @@ jobs:
       - name: Clone 5G-Modem-Support（克隆5G驱动/工具仓库）
         run: |
           git clone https://github.com/Siriling/5G-Modem-Support.git --depth=1 5G-Modem-Support
-          # --depth=1 仅拉取最新代码，减少耗时
 
       ########################################################################
-      # 3. 集成FM350GL专属5G组件（原逻辑不变）
+      # 3. 集成FM350GL专属5G组件（核心修复：LUCI目录路径+提前创建目录）
       ########################################################################
       - name: Copy FM350GL驱动（Fibocom MHI/QMI驱动）
         run: |
@@ -53,22 +51,39 @@ jobs:
           mkdir -p istoreos-src/package/network/utils/fibocom-dial
           cp -r 5G-Modem-Support/fibocom-dial/* istoreos-src/package/network/utils/fibocom-dial/
 
-      - name: Copy LUCI管理界面（hypermodem）
+      # 【修复后的步骤】Copy LUCI管理界面（修正目录路径+提前创建目录）
+      - name: Copy LUCI管理界面（hypermodem，修复目录问题）
         run: |
-          cp -r 5G-Modem-Support/luci-app-hypermodem istoreos-src/package/luci/apps/
-          # 可选：需短信功能则取消注释下方行
-          # cp -r 5G-Modem-Support/luci-app-sms-tool istoreos-src/package/luci/apps/
+          # 1. 定义LUCI应用的正确目标目录（iStoreOS官方路径）
+          LUCI_APP_DIR="istoreos-src/package/luci/applications"
+          # 2. 提前创建目录（-p确保父目录不存在时也能创建，避免报错）
+          mkdir -p "$LUCI_APP_DIR"
+          echo "✅ 已创建LUCI应用目录：$LUCI_APP_DIR"
+          
+          # 3. 复制hypermodem到正确目录
+          cp -r 5G-Modem-Support/luci-app-hypermodem "$LUCI_APP_DIR/"
+          
+          # 4. 验证复制结果（检查目录是否存在，确保复制成功）
+          if [ -d "$LUCI_APP_DIR/luci-app-hypermodem" ]; then
+            echo "✅ luci-app-hypermodem 复制完成"
+          else
+            echo "❌ luci-app-hypermodem 复制失败！"
+            exit 1  # 复制失败终止流程，避免后续编译出错
+          fi
+          
+          # 可选：需短信功能则取消注释下方代码（同样修正目录）
+          # cp -r 5G-Modem-Support/luci-app-sms-tool "$LUCI_APP_DIR/"
+          # if [ -d "$LUCI_APP_DIR/luci-app-sms-tool" ]; then echo "✅ 短信工具复制完成"; fi
 
       ########################################################################
-      # 4. 编译流程优化：拆分步骤+日志保存（核心修改部分）
+      # 4. 编译流程（拆分步骤+日志保存，原优化逻辑不变）
       ########################################################################
       - name: Load custom config（加载配置+验证5G组件）
         run: |
           cp ./.config istoreos-src/.config
           cd istoreos-src
-          # 验证5G组件是否启用，未启用则报警告（不终止流程，方便调试）
           if ! grep -E "fibocom|hypermodem" .config; then
-            echo "⚠️ 警告：.config中未找到5G组件配置（fibocom/hypermodem），可能导致5G功能失效！"
+            echo "⚠️ 警告：.config中未找到5G组件配置，可能导致5G功能失效！"
           fi
 
       - name: Copy custom files（复制自定义文件）
@@ -83,58 +98,51 @@ jobs:
       - name: Update and install feeds（更新包索引）
         run: |
           cd istoreos-src
-          ./scripts/feeds update -a 2>&1 | tee feeds-update.log  # 日志保存到feeds-update.log
-          ./scripts/feeds install -a 2>&1 | tee feeds-install.log  # 日志保存到feeds-install.log
+          ./scripts/feeds update -a 2>&1 | tee feeds-update.log
+          ./scripts/feeds install -a 2>&1 | tee feeds-install.log
 
-      # 子步骤1：生成配置（日志较小，单独步骤避免合并）
       - name: Generate defconfig（生成最终配置）
         run: |
           cd istoreos-src
-          make -j4 defconfig 2>&1 | tee defconfig.log  # -j4限制线程，日志定向到defconfig.log
-          echo "✅ 配置生成完成，日志已保存到 defconfig.log"
+          make -j4 defconfig 2>&1 | tee defconfig.log
+          echo "✅ 配置生成完成"
 
-      # 子步骤2：下载依赖（单独步骤+日志保存，避免与编译日志叠加）
       - name: Download dependencies（下载编译依赖）
         run: |
           cd istoreos-src
-          make -j4 download V=s 2>&1 | tee download.log  # V=s显示详细下载日志，保存到download.log
-          echo "✅ 依赖下载完成，日志已保存到 download.log"
+          make -j4 download V=s 2>&1 | tee download.log
+          echo "✅ 依赖下载完成"
 
-      # 子步骤3：编译固件（核心步骤，限制线程+日志保存）
       - name: Build firmware（编译固件，4线程）
         run: |
           cd istoreos-src
-          # -j4：4线程编译，减少日志输出量；V=s：显示详细编译日志；日志保存到build.log
           make -j4 V=s 2>&1 | tee build.log
-          # 检查编译产物是否存在（存在则编译成功，不存在则报错退出）
           if [ -n "$(ls bin/targets/rockchip/armv8/*.img 2>/dev/null)" ]; then
-            echo "✅ 固件编译成功！产物路径：bin/targets/rockchip/armv8/"
+            echo "✅ 固件编译成功！"
           else
-            echo "❌ 固件编译失败！请查看 build.log 定位问题"
-            exit 1  # 编译失败终止工作流，避免上传空工件
+            echo "❌ 固件编译失败！查看build.log定位问题"
+            exit 1
           fi
 
       ########################################################################
-      # 5. 上传工件：固件+完整日志（解决日志截断的关键）
+      # 5. 上传工件：固件+完整日志（原逻辑不变）
       ########################################################################
-      # 上传完整日志（含所有步骤日志，方便调试）
       - name: Upload full build logs（上传完整日志）
         uses: actions/upload-artifact@v4
         with:
           name: 5g-build-logs（完整日志）
           path: |
-            istoreos-src/feeds-update.log  # feeds更新日志
-            istoreos-src/feeds-install.log  # feeds安装日志
-            istoreos-src/defconfig.log      # 配置生成日志
-            istoreos-src/download.log       # 依赖下载日志
-            istoreos-src/build.log          # 固件编译日志
-            istoreos-src/.config            # 最终编译配置（方便对比）
-          retention-days: 14  # 日志保留14天（可按需调整）
+            istoreos-src/feeds-update.log
+            istoreos-src/feeds-install.log
+            istoreos-src/defconfig.log
+            istoreos-src/download.log
+            istoreos-src/build.log
+            istoreos-src/.config
+          retention-days: 14
 
-      # 上传固件产物（原逻辑保留，新增路径验证）
       - name: Upload firmware（上传固件）
         uses: actions/upload-artifact@v4
         with:
           name: istoreos-rk3568-fm350gl-5g-firmware
-          path: istoreos-src/bin/targets/rockchip/armv8/*.img  # 仅上传img固件
-          retention-days: 30  # 固件保留30天
+          path: istoreos-src/bin/targets/rockchip/armv8/*.img
+          retention-days: 30
