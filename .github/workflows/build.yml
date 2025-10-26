@@ -11,117 +11,89 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       ########################################################################
-      # 1. 基础准备：拉取配置+安装依赖（无修改）
+      # 1. 基础准备：拉取配置+安装依赖
       ########################################################################
-      - name: Checkout local config (含.config)
+      - name: Checkout local config
         uses: actions/checkout@v4
 
-      - name: Install all dependencies
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y \
-            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-            gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
-            python3-distutils rsync unzip zlib1g-dev file wget linux-headers-$(uname -r)
+          sudo apt install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev \
+            libncursesw5-dev libssl-dev libelf-dev python3-distutils \
+            rsync unzip zlib1g-dev file wget
 
       ########################################################################
-      # 2. 拉取源码：iStoreOS + 5G-Modem-Support（增加源码完整性校验）
+      # 2. 拉取源码
       ########################################################################
-      - name: Clone iStoreOS source (带完整性校验)
+      - name: Clone iStoreOS source
         run: |
-          # 克隆iStoreOS主源码
           git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
-          # 校验LUCI核心目录是否存在（避免源码拉取不完整）
-          if [ ! -d "istoreos-src/package/luci" ]; then
-            echo "❌ 重新克隆iStoreOS（首次克隆不完整）"
+          cd istoreos-src
+          if [ ! -d "package/luci" ]; then
+            echo "❌ iStoreOS源码不完整，重新克隆"
+            cd ..
             rm -rf istoreos-src
             git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
           fi
-          # 初始化feeds
-          cd istoreos-src && ./scripts/feeds update -n
-          echo "✅ iStoreOS源码拉取完成，LUCI目录已确认存在"
 
       - name: Clone 5G-Modem-Support
         run: |
           git clone https://github.com/Siriling/5G-Modem-Support.git --depth=1 5G-Modem-Support
-          # 校验5G组件是否存在
-          if [ ! -d "5G-Modem-Support/luci-app-hypermodem" ]; then
-            echo "❌ 5G-Modem-Support仓库拉取失败！"
-            exit 1
-          fi
-          echo "✅ 5G-Modem-Support源码拉取完成"
 
       ########################################################################
-      # 3. 集成5G组件（核心修复：仅用标准目录 applications/，无apps/）
+      # 3. 集成5G组件（修复路径问题）
       ########################################################################
       # 复制5G驱动
-      - name: Copy FM350GL Drivers (MHI/QMI)
+      - name: Copy FM350GL Drivers
         run: |
           mkdir -p istoreos-src/package/kernel/fibocom-drivers
           cp -r 5G-Modem-Support/fibocom_MHI istoreos-src/package/kernel/fibocom-drivers/
           cp -r 5G-Modem-Support/fibocom_QMI_WWAN istoreos-src/package/kernel/fibocom-drivers/
-          echo "✅ 5G驱动复制完成"
 
       # 复制拨号工具
-      - name: Copy fibocom-dial (Dial Tool)
+      - name: Copy fibocom-dial
         run: |
           mkdir -p istoreos-src/package/network/utils/fibocom-dial
           cp -r 5G-Modem-Support/fibocom-dial/* istoreos-src/package/network/utils/fibocom-dial/
-          echo "✅ 5G拨号工具复制完成"
 
-      # 【关键修复】复制LUCI界面（仅用标准目录 applications/，强制创建+校验）
-      - name: Copy luci-app-hypermodem (LUCI Management)
+      # 复制LUCI界面（修复路径：使用applications而不是apps）
+      - name: Copy luci-app-hypermodem
         run: |
-          # 1. 硬编码iStoreOS官方LUCI应用目录（无任何apps/）
           TARGET_DIR="istoreos-src/package/luci/applications"
-          # 2. 强制创建目录（-p确保必存在，sudo避免权限问题）
-          sudo mkdir -p "$TARGET_DIR" && sudo chmod 755 "$TARGET_DIR"
-          # 3. 复制组件
-          sudo cp -rv 5G-Modem-Support/luci-app-hypermodem "$TARGET_DIR/"
-          # 4. 最终校验
+          mkdir -p "$TARGET_DIR"
+          cp -r 5G-Modem-Support/luci-app-hypermodem "$TARGET_DIR/"
           if [ -d "$TARGET_DIR/luci-app-hypermodem" ]; then
-            echo "✅ luci-app-hypermodem复制完成，路径：$TARGET_DIR/luci-app-hypermodem"
+            echo "✅ luci-app-hypermodem复制成功"
           else
-            echo "❌ 复制失败！"
+            echo "❌ 复制失败"
             exit 1
           fi
 
       ########################################################################
-      # 4. 编译+上传（无修改，保留日志优化）
+      # 4. 编译流程
       ########################################################################
-      - name: Load .config
+      - name: Copy config and files
         run: |
-          cp ./.config istoreos-src/.config
-          cd istoreos-src && grep -E "fibocom|hypermodem" .config || echo "⚠️ 5G组件未启用"
+          cp .config istoreos-src/.config
+          [ -d ./files ] && cp -r ./files istoreos-src/ || echo "无自定义文件"
 
-      - name: Copy custom files
-        run: |
-          [ -d ./files ] && cp -r ./files istoreos-src/ || echo "ℹ️ 无files目录"
-
-      - name: Update & install feeds
+      - name: Update feeds
         run: |
           cd istoreos-src
-          ./scripts/feeds update -a 2>&1 | tee feeds.log
-          ./scripts/feeds install -a 2>&1 | tee feeds-install.log
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-      - name: Build firmware (4 threads + log save)
+      - name: Build firmware
         run: |
           cd istoreos-src
-          make -j4 defconfig 2>&1 | tee defconfig.log
-          make -j4 download V=s 2>&1 | tee download.log
-          make -j4 V=s 2>&1 | tee build.log
-          [ -n "$(ls bin/targets/rockchip/armv8/*.img 2>/dev/null)" ] || (echo "❌ 编译失败" && exit 1)
+          make defconfig
+          make download
+          make -j$(nproc)
 
-      - name: Upload logs
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 5g-build-logs
-          path: istoreos-src/*.log
-          retention-days: 14
-
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: istoreos-rk3568-fm350gl-5g
+          name: istoreos-rk3568-5g-firmware
           path: istoreos-src/bin/targets/rockchip/armv8/*.img
-          retention-days: 30
