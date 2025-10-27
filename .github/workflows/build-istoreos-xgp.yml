@@ -1,0 +1,89 @@
+name: 编译iStoreOS-XGP（带QModem5G与自动配置）
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-istoreos-xgp.yml'
+      - 'xgp.config'
+  workflow_dispatch:  # 支持手动触发编译
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TARGET_PLATFORM: rockchip
+      TARGET_SUBPLATFORM: rk35xx
+      DEVICE_PROFILE: nlnet_xgp
+      FIRMWARE_DIST: iStoreOS
+      QMODEM_REPO: https://github.com/FUjr/QModem.git
+
+    steps:
+      - name: 1. 环境依赖安装
+        run: |
+          sudo apt update -y
+          sudo apt install -y build-essential libncurses5-dev libncursesw5-dev \
+            zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip \
+            python3 python3-pip python3-setuptools python3-yaml \
+            flex bison bc quilt libelf-dev libffi-dev dwarves \
+            u-boot-tools dosfstools mtools parted gcc-multilib
+
+      - name: 2. 克隆iStoreOS源码
+        run: |
+          git clone https://github.com/istoreos/istoreos.git $FIRMWARE_DIST
+          cd $FIRMWARE_DIST
+          # 切换到稳定分支（可根据需求调整，如23.05）
+          git checkout $(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+' | head -1)
+
+      - name: 3. 集成QModem Feed源
+        run: |
+          cd $FIRMWARE_DIST
+          # 添加QModem到软件源
+          echo "src-git qmodem $QMODEM_REPO" >> feeds.conf.default
+          # 更新并安装所有软件源
+          ./scripts/feeds update -a > /dev/null 2>&1  # 减少日志输出
+          ./scripts/feeds install -a -f
+
+      - name: 4. 导入并优化配置文件
+        run: |
+          cd $FIRMWARE_DIST
+          # 下载优化后的XGP配置文件（替换为你的config文件路径，此处示例用raw链接）
+          wget -O .config https://raw.githubusercontent.com/你的仓库/你的分支/xgp-qmodem.config
+          # 生成完整配置（自动补全依赖）
+          make defconfig
+          # 检查QModem是否已启用
+          if ! grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config; then
+            echo "ERROR: QModem未启用，配置文件异常！"
+            exit 1
+          fi
+
+      - name: 5. 编译固件（日志控制防中断）
+        run: |
+          cd $FIRMWARE_DIST
+          # 限制日志级别（V=sc：简洁输出，减少日志量），并分阶段记录日志
+          make -j$(nproc) V=sc 2>&1 | tee build.log
+          # 编译完成后检查固件是否存在
+          if [ ! -d "bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM" ]; then
+            echo "ERROR: 编译失败，未生成固件目录！"
+            cat build.log | tail -200  # 输出最后200行日志用于排查
+            exit 1
+          fi
+
+      - name: 6. 打包输出文件
+        run: |
+          cd $FIRMWARE_DIST
+          # 创建输出目录
+          mkdir -p output
+          # 复制固件（筛选主要固件文件，如sysupgrade.bin和factory.img）
+          cp bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/*.sysupgrade.bin output/
+          cp bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/*.factory.img output/
+          # 复制配置文件和编译日志
+          cp .config output/xgp-qmodem-final.config
+          cp build.log output/build.log
+
+      - name: 7. 上传产物（Artifacts）
+        uses: actions/upload-artifact@v4
+        with:
+          name: istoreos-xgp-qmodem-firmware
+          path: ${{ env.FIRMWARE_DIST }}/output/
+          retention-days: 30  # 产物保留30天
