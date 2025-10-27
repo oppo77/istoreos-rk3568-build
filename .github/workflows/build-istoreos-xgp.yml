@@ -21,19 +21,25 @@ jobs:
       - name: 1. 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 2. 安装编译依赖
+      - name: 2. 安装【完整】编译依赖（关键修复）
         run: |
           sudo apt update -y
-          sudo apt install -y build-essential libncurses5-dev libncursesw5-dev \
+          # 安装 OpenWRT 官方文档推荐的所有依赖，避免 prereq 检查失败
+          sudo apt install -y \
+            build-essential libncurses5-dev libncursesw5-dev \
             zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip \
+            subversion git-lfs xz-utils \  # 补充：版本控制/压缩工具
             python3 python3-pip python3-setuptools python3-yaml \
+            python3-distutils python3-apt \  # 补充：Python 工具链
             flex bison bc quilt libelf-dev libffi-dev dwarves \
-            u-boot-tools dosfstools mtools parted gcc-multilib
+            u-boot-tools dosfstools mtools parted gcc-multilib \
+            libc6-dev-i386  # 补充：32位兼容库（部分编译需要）
 
       - name: 3. 克隆iStoreOS源码
         run: |
           git clone https://github.com/istoreos/istoreos.git $FIRMWARE_DIST
           cd $FIRMWARE_DIST
+          # 切换到最新稳定版（避免开发版依赖问题）
           git checkout $(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+' | head -1)
 
       - name: 4. 集成QModem
@@ -43,32 +49,28 @@ jobs:
           ./scripts/feeds update -a > /dev/null 2>&1
           ./scripts/feeds install -a -f
 
-      - name: 5. 下载配置文件（100%正确链接，无需修改）
+      - name: 5. 下载配置文件（已固化正确链接）
         run: |
           cd $FIRMWARE_DIST
-          # 👇 以下是你的配置文件的【唯一正确链接】，已彻底固化
           CORRECT_URL="https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/main/xgp-qmodem.config"
-          echo "正在使用的正确链接：$CORRECT_URL"
+          echo "使用配置文件链接：$CORRECT_URL"
           
-          # 直接下载，增加超时和证书容错，避免网络/证书问题
+          # 下载配置文件
           if ! wget --no-check-certificate --timeout=10 -O .config "$CORRECT_URL"; then
-            echo "ERROR: 配置文件下载失败！请立即检查以下2点："
-            echo "1. 链接是否被手动修改？正确链接必须是：$CORRECT_URL"
-            echo "2. 仓库 'oppo77/istoreos-rk3568-build' 是否为【公开仓库】（私有仓库无权限访问）"
-            echo "3. 确认 'main' 分支下确实存在 'xgp-qmodem.config' 文件（无拼写错误）"
+            echo "ERROR: 配置文件下载失败！请检查仓库是否公开、文件是否存在"
             exit 1
           fi
           
-          # 验证配置文件是否完整（必须包含目标平台配置）
+          # 验证配置完整性
           if ! grep -q "CONFIG_TARGET_DEVICE_rockchip_rk35xx_DEVICE_nlnet_xgp=y" .config; then
-            echo "ERROR: 下载的文件不是有效的xgp配置文件，可能是文件损坏或链接错！"
+            echo "ERROR: 配置文件无效！"
             exit 1
           fi
           
-          # 生成编译配置并验证QModem
+          # 生成编译配置
           make defconfig
           if ! grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config; then
-            echo "ERROR: 配置文件中未启用QModem，请检查xgp-qmodem.config！"
+            echo "ERROR: QModem未启用！"
             exit 1
           fi
 
@@ -80,14 +82,17 @@ jobs:
             echo "已复制预配置文件："
             ls -R ./files
           else
-            echo "ERROR: 仓库根目录缺少files目录！请按说明创建files/etc/config等结构"
+            echo "ERROR: 缺少files目录！"
             exit 1
           fi
 
-      - name: 7. 编译固件
+      - name: 7. 编译固件（优化编译参数）
         run: |
           cd $FIRMWARE_DIST
-          make -j$(nproc) V=sc 2>&1 | tee build.log
+          # 限制并行编译数（避免Ubuntu资源不足），同时控制日志
+          make -j$(($(nproc)-1)) V=sc 2>&1 | tee build.log
+          
+          # 验证固件生成
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
           if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
             echo "ERROR: 编译失败！最后300行日志："
