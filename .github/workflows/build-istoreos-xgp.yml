@@ -1,4 +1,4 @@
-name: 编译iStoreOS-XGP（带QModem5G与自动配置）
+name: 编译iStoreOS-XGP（24.10版+QModem5G）
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
       - '.github/workflows/build-istoreos-xgp.yml'
       - 'xgp-qmodem.config'
       - 'files/**'
-  workflow_dispatch:
+  workflow_dispatch:  # 支持手动触发
 
 jobs:
   build:
@@ -16,108 +16,132 @@ jobs:
       TARGET_PLATFORM: rockchip
       TARGET_SUBPLATFORM: rk35xx
       FIRMWARE_DIST: istoreos
+      TARGET_ISTOREOS_VERSION: "v24.10"  # 目标iStoreOS版本
 
     steps:
-      - name: 1. 拉取仓库代码
+      - name: 1. 拉取仓库代码（含预配置文件）
         uses: actions/checkout@v4
 
-      - name: 2. 安装【OpenWRT官方完整依赖】（关键修复）
+      - name: 2. 更换国内源+安装完整依赖（兼容24.10）
         run: |
-          sudo apt update -y
-          # 严格按照 OpenWRT 官方文档安装所有必需依赖（针对 Ubuntu 22.04）
+          # 更换阿里云源，解决包下载慢/失败问题
+          sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
+          sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
+          sudo apt clean && sudo apt update -y
+
+          # 优先强制安装关键依赖 xz-utils（避免编译中断）
+          echo "单独安装 xz-utils..."
+          if ! sudo apt install -y xz-utils; then
+            echo "重试安装 xz-utils..."
+            sudo apt install -y xz-utils
+          fi
+
+          # 安装iStoreOS 24.10编译必需的依赖（基于OpenWRT 24.03+适配）
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
             libtool autoconf automake pkg-config perl python3 python3-pip \
-            python3-setuptools python3-yaml rsync subversion unzip wget xz-utils \
+            python3-setuptools python3-yaml rsync subversion unzip wget \
             zlib1g-dev quilt libc6-dev-i386 u-boot-tools dosfstools mtools parted \
-            dwarves bc
+            dwarves bc liblz4-tool  # 24.10新增：lz4压缩支持（部分组件依赖）
 
-          # 手动检查关键依赖是否安装成功（定位缺失的包）
-          REQUIRED_TOOLS="gcc g++ make flex bison python3 rsync wget unzip xz-utils"
+          # 验证关键依赖是否安装成功
+          REQUIRED_TOOLS="xz gcc g++ make python3 rsync wget unzip"
           for tool in $REQUIRED_TOOLS; do
             if ! command -v $tool &> /dev/null; then
-              echo "ERROR: 关键依赖 $tool 未安装成功！"
+              echo "ERROR: 关键依赖 $tool 未安装！"
               exit 1
             fi
           done
-          echo "所有关键依赖检查通过"
+          echo "所有依赖检查通过（适配iStoreOS 24.10）"
 
-      - name: 3. 克隆iStoreOS源码并切换稳定版
+      - name: 3. 克隆iStoreOS源码并切换到24.10版本
         run: |
+          # 克隆iStoreOS仓库
           git clone https://github.com/istoreos/istoreos.git $FIRMWARE_DIST
           cd $FIRMWARE_DIST
-          # 切换到 iStoreOS 最新稳定版（v23.05.2 是经测试兼容的版本）
-          git checkout v23.05.2
-          echo "已切换到 iStoreOS v23.05.2"
 
-      - name: 4. 同步并安装软件源（含QModem）
+          # 切换到目标版本（24.10），若tag不存在则提示并退出
+          if git rev-parse --verify --quiet ${{ env.TARGET_ISTOREOS_VERSION }}; then
+            git checkout ${{ env.TARGET_ISTOREOS_VERSION }}
+            echo "已切换到iStoreOS ${{ env.TARGET_ISTOREOS_VERSION }} 版本"
+          else
+            echo "ERROR: iStoreOS ${{ env.TARGET_ISTOREOS_VERSION }} 版本不存在！"
+            echo "请确认官方tag：https://github.com/istoreos/istoreos/tags"
+            exit 1
+          fi
+
+      - name: 4. 集成QModem 5G管理插件（兼容24.10）
         run: |
           cd $FIRMWARE_DIST
-          # 添加QModem源
+          # 添加QModem软件源（适配iStoreOS 24.10的feeds机制）
           echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
-          # 完整更新源（不静默，便于排查源同步错误）
+          # 更新源并强制安装所有包（确保QModem依赖被正确拉取）
           ./scripts/feeds update -a
-          # 安装所有软件包（强制覆盖）
           ./scripts/feeds install -a -f
 
-      - name: 5. 导入配置文件并验证
+      - name: 5. 导入XGP配置文件（固化正确链接）
         run: |
           cd $FIRMWARE_DIST
           CONFIG_URL="https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/main/xgp-qmodem.config"
           echo "下载配置文件：$CONFIG_URL"
-          
-          # 下载配置文件
+
+          # 下载配置文件并容错
           if ! wget --no-check-certificate -O .config "$CONFIG_URL"; then
-            echo "ERROR: 配置文件下载失败！请检查仓库是否公开、文件是否存在"
+            echo "ERROR: 配置文件下载失败！请确认仓库公开性和文件路径"
             exit 1
           fi
-          
-          # 生成完整配置（自动补全依赖）
+
+          # 生成24.10兼容的完整配置（自动补全依赖）
           make defconfig
-          
-          # 验证配置有效性
+
+          # 验证核心配置是否生效
           if ! grep -q "CONFIG_TARGET_rockchip=y" .config; then
-            echo "ERROR: 配置文件未指定 Rockchip 平台！"
+            echo "ERROR: 配置文件未指定Rockchip平台！"
             exit 1
           fi
           if ! grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config; then
-            echo "ERROR: QModem 未在配置中启用！"
+            echo "ERROR: QModem未在配置中启用！"
             exit 1
           fi
 
-      - name: 6. 执行前置检查（手动触发，便于定位错误）
+      - name: 6. 执行前置检查（确保24.10编译环境就绪）
         run: |
           cd $FIRMWARE_DIST
-          # 手动运行 prereq 检查，输出详细日志
+          # 详细输出检查日志，便于定位24.10版本的依赖问题
           make prereq V=99
 
-      - name: 7. 编译固件（单核心模式，提高稳定性）
+      - name: 7. 编译固件（适配24.10，单核心保稳定）
         run: |
           cd $FIRMWARE_DIST
-          # 单核心编译（避免资源不足），保存详细日志
+          # 单核心编译（避免24.10源码编译时资源不足），保存详细日志
           make -j1 V=s 2>&1 | tee build.log
-          
-          # 验证固件生成
+
+          # 验证固件是否生成
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
           if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
-            echo "ERROR: 固件编译失败！最后500行日志："
+            echo "ERROR: 24.10版本固件编译失败！最后500行日志："
             cat build.log | tail -500
             exit 1
           fi
+          echo "iStoreOS 24.10 固件编译成功！"
 
-      - name: 8. 打包产物并上传
+      - name: 8. 打包产物（含配置和日志）
         run: |
           cd $FIRMWARE_DIST
           mkdir -p output
-          cp bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/*.sysupgrade.bin output/
-          cp bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/*.factory.img output/ 2>/dev/null
-          cp .config output/final_config.config
-          cp build.log output/build_log.txt
+          # 复制核心固件文件
+          cp $FIRMWARE_DIR/*.sysupgrade.bin output/
+          cp $FIRMWARE_DIR/*.factory.img output/ 2>/dev/null
+          # 复制调试文件（便于后续排查版本问题）
+          cp .config output/final_config_24.10.config
+          cp build.log output/build_log_24.10.txt
+          echo "24.10版本产物列表："
+          ls -l output/
 
-      - name: 9. 上传产物
+      - name: 9. 上传24.10版本产物（保留30天）
         uses: actions/upload-artifact@v4
         with:
-          name: istoreos-xgp-firmware
+          name: istoreos-24.10-xgp-firmware
           path: ${{ env.FIRMWARE_DIST }}/output/
           retention-days: 30
