@@ -1,4 +1,4 @@
-name: 编译iStoreOS-XGP（最新版+QModem5G）
+name: 编译iStoreOS-XGP（最新版+QModem5G，双核）
 
 on:
   push:
@@ -21,14 +21,11 @@ jobs:
       - name: 1. 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 2. 安装系统依赖+Python模块（修复elftools缺失）
+      - name: 2. 安装系统依赖+Python模块
         run: |
-          # 更换阿里云源，确保包同步
           sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo apt clean && sudo apt update -y
-
-          # 安装系统依赖（含之前修复的squashfs-tools等）
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
@@ -37,29 +34,16 @@ jobs:
             zlib1g-dev quilt libc6-dev-i386 u-boot-tools dosfstools mtools parted \
             dwarves bc liblz4-tool meson ninja-build cmake \
             squashfs-tools patchelf libseccomp-dev device-tree-compiler
-
-          # 关键：安装U-Boot所需的Python3 elftools模块（包名为pyelftools）
-          echo "安装Python3 elftools模块（pyelftools）..."
-          if ! python3 -m pip install pyelftools; then
-            echo "重试安装pyelftools..."
-            python3 -m pip install pyelftools --upgrade  # 强制升级安装
-          fi
-
-          # 验证elftools模块是否安装成功
-          echo "验证elftools模块..."
+          # 安装pyelftools
+          python3 -m pip install pyelftools --upgrade
+          # 验证关键依赖
           if ! python3 -c "import elftools" &> /dev/null; then
-            echo "ERROR: Python3 elftools模块（pyelftools）安装失败！"
+            echo "ERROR: pyelftools安装失败！"
             exit 1
           fi
-          echo "elftools模块验证通过"
-
-          # 验证其他关键工具
-          REQUIRED_TOOLS="xz gcc g++ make python3 rsync wget unzip mksquashfs"
+          REQUIRED_TOOLS="xz gcc g++ make python3 rsync wget mksquashfs"
           for tool in $REQUIRED_TOOLS; do
-            if ! command -v $tool &> /dev/null; then
-              echo "ERROR: 依赖 $tool 未安装！"
-              exit 1
-            fi
+            command -v $tool &> /dev/null || { echo "ERROR: 缺失$tool"; exit 1; }
           done
 
       - name: 3. 克隆iStoreOS最新源码
@@ -67,7 +51,7 @@ jobs:
           git clone https://github.com/istoreos/istoreos.git $FIRMWARE_DIST
           cd $FIRMWARE_DIST
           git pull
-          echo "当前源码commit：$(git rev-parse --short HEAD)"
+          echo "当前commit：$(git rev-parse --short HEAD)"
 
       - name: 4. 同步软件源（含QModem）
         run: |
@@ -85,22 +69,23 @@ jobs:
           grep -q "CONFIG_TARGET_rockchip=y" .config || exit 1
           grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config || exit 1
 
-      - name: 6. 执行前置检查（验证U-Boot依赖）
+      - name: 6. 执行前置检查
         run: |
           cd $FIRMWARE_DIST
           make prereq V=99 2>&1 | tee prereq.log
 
-      - name: 7. 编译固件（优化日志，避免截断）
+      - name: 7. 双核编译固件（-j2，优化速度）
         run: |
           cd $FIRMWARE_DIST
-          # 核心修改：将V=s（详细日志）改为V=m（精简日志），减少输出量
-          make -j1 V=m 2>&1 | tee build.log
+          # 核心修改：使用-j2（双核心编译），保留精简日志V=m
+          make -j2 V=m 2>&1 | tee build.log
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
-          # 失败时输出更多日志（1000行），便于排查问题
-          [ -d "$FIRMWARE_DIR" ] && [ -n "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ] || {
+          # 失败时输出更多日志，便于排查内存不足问题
+          if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
+            echo "ERROR: 编译失败，最后1000行日志："
             cat build.log | tail -1000
             exit 1
-          }
+          fi
 
       - name: 8. 打包产物
         run: |
