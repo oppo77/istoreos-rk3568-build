@@ -6,7 +6,7 @@ on:
     branches: [ main ]
     paths:
       - '.github/workflows/build-istoreos-xgp.yml'
-      - 'configs/xgp-5g.config'
+      - 'xgp-5g.config'  # 配置文件路径修改为根目录
 
 jobs:
   build:
@@ -52,11 +52,15 @@ jobs:
           # 安装5G相关 feeds
           ./scripts/feeds install -a -p 5G-Modem-Support
 
-      - name: Load custom configuration
+      - name: Load custom configuration (修正路径)
         run: |
           cd istoreos
-          # 复制配置文件
-          cp $GITHUB_WORKSPACE/configs/xgp-5g.config .config
+          # 调试：列出仓库根目录文件，确认配置文件存在
+          echo "仓库根目录文件列表："
+          ls -la $GITHUB_WORKSPACE
+          
+          # 复制配置文件（路径改为根目录的xgp-5g.config）
+          cp $GITHUB_WORKSPACE/xgp-5g.config .config
           
           # 确保配置生效
           make defconfig
