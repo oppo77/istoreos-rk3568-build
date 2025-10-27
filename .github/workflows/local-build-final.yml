@@ -1,4 +1,4 @@
-name: 本地编译iStoreOS-XGP（依赖修复版）
+name: 本地编译iStoreOS-XGP（QModem依赖修复）
 
 on:
   workflow_dispatch:
@@ -25,23 +25,17 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 2. 安装系统依赖（修正反斜杠格式）
+      - name: 2. 安装系统依赖
         run: |
           echo "===== 安装核心系统依赖 ====="
-          # 修复：反斜杠仅用于续行，后面无空格/注释，确保没有多余字符
           REQUIRED_PACKAGES="build-essential flex bison g++ gawk gcc-multilib \
             gettext git libncurses5-dev libssl-dev libelf-dev python3 python3-pip \
             python3-venv rsync unzip wget zlib1g-dev quilt u-boot-tools squashfs-tools \
             meson ninja-build cmake device-tree-compiler liblz4-tool \
-            swig \
-            python3-dev python3-setuptools \
-            libncursesw5-dev"
+            swig python3-dev python3-setuptools libncursesw5-dev"
 
           for pkg in $REQUIRED_PACKAGES; do
-            # 跳过空项或无效字符（如反斜杠）
-            if [ -z "$pkg" ] || [ "$pkg" = "\\" ]; then
-              continue
-            fi
+            if [ -z "$pkg" ] || [ "$pkg" = "\\" ]; then continue; fi
             if ! dpkg -l | grep -q "$pkg"; then
               echo "安装缺失依赖：$pkg"
               sudo apt update -y
@@ -49,13 +43,12 @@ jobs:
             fi
           done
 
-          # 验证关键工具
           if ! command -v swig &> /dev/null; then
             echo "ERROR: swig安装失败！"
             exit 1
           fi
 
-      - name: 3. 配置Python虚拟环境（确保pyelftools）
+      - name: 3. 配置Python虚拟环境
         run: |
           echo "===== 准备虚拟环境 ====="
           mkdir -p "$(dirname ${{ env.VENV_PATH }})"
@@ -80,26 +73,48 @@ jobs:
           git checkout ${{ env.ISTOREOS_BRANCH }} || exit 1
           git pull || exit 1
 
-      - name: 5. 同步软件源
+      - name: 5. 同步QModem源（适配实际包名）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
+          # 替换国内源加速
           sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#g' feeds.conf.default
+
+          # 清理旧QModem源并添加官方源
           sed -i '/qmodem/d' feeds.conf.default
           echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
-          sed -i '/baidupcs-web/d' feeds.conf.default
-          ./scripts/feeds update -a -f || exit 1
-          ./scripts/feeds install -a -f || exit 1
 
-          if [ ! -d "package/feeds/qmodem/quectel-CM-5G" ] || [ ! -d "package/feeds/qmodem/quectel-cm" ]; then
-            echo "ERROR: QModem依赖缺失！"
-            exit 1
-          fi
+          # 强制同步并安装（显示详细日志，便于排查）
+          echo "===== 同步QModem源 ====="
+          ./scripts/feeds update -a -f -v || exit 1  # -v显示详细同步日志
+          echo "===== 安装QModem包 ====="
+          ./scripts/feeds install -a -f -v || exit 1  # -v显示安装详情
 
-      - name: 6. 导入设备配置
+          # 关键修复：适配QModem源实际包名（可能使用下划线而非连字符）
+          echo "===== 列出QModem源中的包 ====="
+          ls -l package/feeds/qmodem/  # 输出实际包名，便于调试
+
+          # 检查实际存在的依赖包（根据日志，可能是quectel_CM_5G_M等）
+          REQUIRED_QMODEM_PACKAGES=(
+            "quectel_CM_5G_M"  # 日志中出现的包名（下划线）
+            "quectel_MHI"      # 确认存在的包
+            "qfirehose"
+          )
+          for pkg in "${REQUIRED_QMODEM_PACKAGES[@]}"; do
+            if [ ! -d "package/feeds/qmodem/$pkg" ]; then
+              echo "ERROR: QModem依赖包 $pkg 未同步！"
+              exit 1
+            fi
+          done
+
+      - name: 6. 导入设备配置（适配QModem实际依赖）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
           cp ${{ github.workspace }}/xgp-qmodem.config .config
-          sed -i 's/CONFIG_PACKAGE_luci-app-baidupcs-web=y/# CONFIG_PACKAGE_luci-app-baidupcs-web is not set/' .config
+
+          # 修正配置中依赖的包名（连字符→下划线，匹配源实际包名）
+          sed -i 's/quectel-CM-5G/quectel_CM_5G_M/g' .config
+          sed -i 's/quectel-cm/quectel_CM_5G_M/g' .config  # 用实际存在的包替代
+
           make defconfig || exit 1
 
       - name: 7. 编译
