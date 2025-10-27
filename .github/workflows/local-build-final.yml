@@ -25,18 +25,17 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 2. 安装系统依赖（补充swig和必备工具）
+      - name: 2. 安装系统依赖（修正格式，仅保留包名）
         run: |
           echo "===== 安装核心系统依赖 ====="
-          # 补充 swig（U-Boot必需）和其他缺失工具
+          # 修复：依赖列表仅保留包名，注释用#单独写，不混入包名中
           REQUIRED_PACKAGES="build-essential flex bison g++ gawk gcc-multilib \
             gettext git libncurses5-dev libssl-dev libelf-dev python3 python3-pip \
             python3-venv rsync unzip wget zlib1g-dev quilt u-boot-tools squashfs-tools \
             meson ninja-build cmake device-tree-compiler liblz4-tool \
-            swig  # 新增：U-Boot依赖的swig工具
-            python3-dev python3-setuptools  # 确保Python开发库
-            libncursesw5-dev  # 补充ncurses开发库
-          "
+            swig \  # U-Boot依赖的swig工具（注释单独写，不影响包名）
+            python3-dev python3-setuptools \
+            libncursesw5-dev"
 
           for pkg in $REQUIRED_PACKAGES; do
             if ! dpkg -l | grep -q "$pkg"; then
@@ -98,8 +97,6 @@ jobs:
 
           # 移除baidupcs-web相关源（避免依赖错误，或替换为有效源）
           sed -i '/baidupcs-web/d' feeds.conf.default
-          # 可选：若需要baidupcs-web，添加正确源
-          # echo "src-git baidupcs https://github.com/linkease/baidupcs-web.git" >> feeds.conf.default
 
           # 强制同步所有源（--force更新）
           ./scripts/feeds update -a -f || exit 1
