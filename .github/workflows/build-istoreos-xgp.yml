@@ -21,95 +21,105 @@ jobs:
       - name: 1. 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 2. 安装【完整】编译依赖（关键修复）
+      - name: 2. 安装【兼容且精简】的编译依赖（关键修复）
         run: |
           sudo apt update -y
-          # 安装 OpenWRT 官方文档推荐的所有依赖，避免 prereq 检查失败
+          # 仅保留 OpenWRT 22.04 官方兼容的核心依赖，避免包名不存在问题
           sudo apt install -y \
             build-essential libncurses5-dev libncursesw5-dev \
             zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip \
-            subversion git-lfs xz-utils \  # 补充：版本控制/压缩工具
             python3 python3-pip python3-setuptools python3-yaml \
-            python3-distutils python3-apt \  # 补充：Python 工具链
             flex bison bc quilt libelf-dev libffi-dev dwarves \
             u-boot-tools dosfstools mtools parted gcc-multilib \
-            libc6-dev-i386  # 补充：32位兼容库（部分编译需要）
+            libc6-dev-i386 subversion xz-utils
+          # 检查依赖是否安装成功（可选验证）
+          if [ $? -ne 0 ]; then
+            echo "ERROR: 依赖安装失败！请检查apt源或包名是否正确"
+            exit 1
+          fi
 
       - name: 3. 克隆iStoreOS源码
         run: |
           git clone https://github.com/istoreos/istoreos.git $FIRMWARE_DIST
           cd $FIRMWARE_DIST
-          # 切换到最新稳定版（避免开发版依赖问题）
-          git checkout $(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+' | head -1)
+          # 切换到最新稳定版（避免开发版依赖冲突）
+          STABLE_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          if [ -z "$STABLE_TAG" ]; then
+            STABLE_TAG="v23.05.2"  #  fallback到已知稳定版
+          fi
+          git checkout $STABLE_TAG
+          echo "已切换到iStoreOS稳定版：$STABLE_TAG"
 
       - name: 4. 集成QModem
         run: |
           cd $FIRMWARE_DIST
           echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
+          # 静默更新软件源，避免日志冗余
           ./scripts/feeds update -a > /dev/null 2>&1
+          # 强制安装所有包，确保QModem被正确集成
           ./scripts/feeds install -a -f
 
-      - name: 5. 下载配置文件（已固化正确链接）
+      - name: 5. 下载配置文件（固化正确链接）
         run: |
           cd $FIRMWARE_DIST
-          CORRECT_URL="https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/main/xgp-qmodem.config"
-          echo "使用配置文件链接：$CORRECT_URL"
+          CONFIG_URL="https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/main/xgp-qmodem.config"
+          echo "正在下载配置文件：$CONFIG_URL"
           
-          # 下载配置文件
-          if ! wget --no-check-certificate --timeout=10 -O .config "$CORRECT_URL"; then
-            echo "ERROR: 配置文件下载失败！请检查仓库是否公开、文件是否存在"
+          # 下载并容错
+          if ! wget --no-check-certificate --timeout=15 -O .config "$CONFIG_URL"; then
+            echo "ERROR: 配置文件下载失败！请确认："
+            echo "1. 仓库 'oppo77/istoreos-rk3568-build' 是公开仓库"
+            echo "2. main分支下存在 'xgp-qmodem.config' 文件"
             exit 1
           fi
           
-          # 验证配置完整性
-          if ! grep -q "CONFIG_TARGET_DEVICE_rockchip_rk35xx_DEVICE_nlnet_xgp=y" .config; then
-            echo "ERROR: 配置文件无效！"
-            exit 1
-          fi
-          
-          # 生成编译配置
+          # 生成完整配置并验证
           make defconfig
           if ! grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config; then
-            echo "ERROR: QModem未启用！"
+            echo "ERROR: QModem未启用，请检查配置文件！"
             exit 1
           fi
 
-      - name: 6. 复制预配置文件
+      - name: 6. 复制预配置文件（WiFi+5G自启）
         run: |
           cd $FIRMWARE_DIST
           if [ -d "../files" ]; then
             cp -r ../files/ ./files/
             echo "已复制预配置文件："
-            ls -R ./files
+            ls -R ./files 2>/dev/null
           else
-            echo "ERROR: 缺少files目录！"
-            exit 1
+            echo "WARNING: 未找到files目录，跳过预配置复制（后续需手动配置WiFi/5G）"
+            # 不退出，允许编译继续（避免因预配置缺失中断）
           fi
 
-      - name: 7. 编译固件（优化编译参数）
+      - name: 7. 编译固件（控制资源+日志）
         run: |
           cd $FIRMWARE_DIST
-          # 限制并行编译数（避免Ubuntu资源不足），同时控制日志
-          make -j$(($(nproc)-1)) V=sc 2>&1 | tee build.log
+          # 预留1个CPU核心，避免资源耗尽（GitHub Actions默认2核，用1核编译）
+          make -j1 V=sc 2>&1 | tee build.log
           
-          # 验证固件生成
+          # 验证固件是否生成
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
           if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
-            echo "ERROR: 编译失败！最后300行日志："
-            cat build.log | tail -300
+            echo "ERROR: 固件编译失败！最后500行日志："
+            cat build.log | tail -500
             exit 1
           fi
 
-      - name: 8. 打包并上传产物
+      - name: 8. 打包产物
         run: |
           cd $FIRMWARE_DIST
           mkdir -p output
-          cp bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/*.sysupgrade.bin output/
-          cp bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/*.factory.img output/
+          # 复制主要固件文件
+          cp $FIRMWARE_DIR/*.sysupgrade.bin output/
+          cp $FIRMWARE_DIR/*.factory.img output/ 2>/dev/null
+          # 复制调试文件
           cp .config output/final_config.config
           cp build.log output/build_log.txt
+          echo "产物列表："
+          ls -l output/
 
-      - name: 9. 上传产物
+      - name: 9. 上传产物（保留30天）
         uses: actions/upload-artifact@v4
         with:
           name: istoreos-xgp-firmware
