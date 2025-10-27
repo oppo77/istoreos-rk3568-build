@@ -1,4 +1,4 @@
-name: 编译iStoreOS-XGP（24.10版+QModem5G）
+name: 编译iStoreOS-XGP（最新版+QModem5G）
 
 on:
   push:
@@ -16,36 +16,30 @@ jobs:
       TARGET_PLATFORM: rockchip
       TARGET_SUBPLATFORM: rk35xx
       FIRMWARE_DIST: istoreos
-      TARGET_ISTOREOS_VERSION: "v24.10"  # 目标iStoreOS版本
 
     steps:
       - name: 1. 拉取仓库代码（含预配置文件）
         uses: actions/checkout@v4
 
-      - name: 2. 更换国内源+安装完整依赖（兼容24.10）
+      - name: 2. 更换国内源+安装最新版依赖
         run: |
-          # 更换阿里云源，解决包下载慢/失败问题
+          # 更换阿里云源，加速依赖下载
           sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo apt clean && sudo apt update -y
 
-          # 优先强制安装关键依赖 xz-utils（避免编译中断）
-          echo "单独安装 xz-utils..."
-          if ! sudo apt install -y xz-utils; then
-            echo "重试安装 xz-utils..."
-            sudo apt install -y xz-utils
-          fi
-
-          # 安装iStoreOS 24.10编译必需的依赖（基于OpenWRT 24.03+适配）
+          # 优先安装关键依赖（兼容最新版iStoreOS）
+          sudo apt install -y xz-utils  # 强制确保xz-utils安装
+          # 安装最新版iStoreOS编译必需的完整依赖
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
             libtool autoconf automake pkg-config perl python3 python3-pip \
             python3-setuptools python3-yaml rsync subversion unzip wget \
             zlib1g-dev quilt libc6-dev-i386 u-boot-tools dosfstools mtools parted \
-            dwarves bc liblz4-tool  # 24.10新增：lz4压缩支持（部分组件依赖）
+            dwarves bc liblz4-tool  # 适配最新版的压缩依赖
 
-          # 验证关键依赖是否安装成功
+          # 验证关键工具是否安装
           REQUIRED_TOOLS="xz gcc g++ make python3 rsync wget unzip"
           for tool in $REQUIRED_TOOLS; do
             if ! command -v $tool &> /dev/null; then
@@ -53,95 +47,85 @@ jobs:
               exit 1
             fi
           done
-          echo "所有依赖检查通过（适配iStoreOS 24.10）"
+          echo "依赖检查通过（适配iStoreOS最新版）"
 
-      - name: 3. 克隆iStoreOS源码并切换到24.10版本
+      - name: 3. 克隆iStoreOS最新源码
         run: |
-          # 克隆iStoreOS仓库
+          # 克隆官方仓库并使用最新main分支（默认分支）
           git clone https://github.com/istoreos/istoreos.git $FIRMWARE_DIST
           cd $FIRMWARE_DIST
+          # 拉取最新代码（确保是最新提交）
+          git pull
+          echo "已获取iStoreOS最新源码，当前commit：$(git rev-parse --short HEAD)"
 
-          # 切换到目标版本（24.10），若tag不存在则提示并退出
-          if git rev-parse --verify --quiet ${{ env.TARGET_ISTOREOS_VERSION }}; then
-            git checkout ${{ env.TARGET_ISTOREOS_VERSION }}
-            echo "已切换到iStoreOS ${{ env.TARGET_ISTOREOS_VERSION }} 版本"
-          else
-            echo "ERROR: iStoreOS ${{ env.TARGET_ISTOREOS_VERSION }} 版本不存在！"
-            echo "请确认官方tag：https://github.com/istoreos/istoreos/tags"
-            exit 1
-          fi
-
-      - name: 4. 集成QModem 5G管理插件（兼容24.10）
+      - name: 4. 集成QModem（兼容最新版）
         run: |
           cd $FIRMWARE_DIST
-          # 添加QModem软件源（适配iStoreOS 24.10的feeds机制）
+          # 添加QModem源（适配最新版feeds机制）
           echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
-          # 更新源并强制安装所有包（确保QModem依赖被正确拉取）
+          # 更新并安装所有软件包（最新版可能有依赖变动，不静默输出）
           ./scripts/feeds update -a
           ./scripts/feeds install -a -f
 
-      - name: 5. 导入XGP配置文件（固化正确链接）
+      - name: 5. 导入XGP配置文件
         run: |
           cd $FIRMWARE_DIST
           CONFIG_URL="https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/main/xgp-qmodem.config"
           echo "下载配置文件：$CONFIG_URL"
 
-          # 下载配置文件并容错
+          # 下载配置文件
           if ! wget --no-check-certificate -O .config "$CONFIG_URL"; then
-            echo "ERROR: 配置文件下载失败！请确认仓库公开性和文件路径"
+            echo "ERROR: 配置文件下载失败！"
             exit 1
           fi
 
-          # 生成24.10兼容的完整配置（自动补全依赖）
+          # 生成最新版兼容的配置
           make defconfig
 
-          # 验证核心配置是否生效
+          # 验证核心配置
           if ! grep -q "CONFIG_TARGET_rockchip=y" .config; then
-            echo "ERROR: 配置文件未指定Rockchip平台！"
+            echo "ERROR: 未启用Rockchip平台！"
             exit 1
           fi
           if ! grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config; then
-            echo "ERROR: QModem未在配置中启用！"
+            echo "ERROR: QModem未启用！"
             exit 1
           fi
 
-      - name: 6. 执行前置检查（确保24.10编译环境就绪）
+      - name: 6. 前置检查（确保最新环境就绪）
         run: |
           cd $FIRMWARE_DIST
-          # 详细输出检查日志，便于定位24.10版本的依赖问题
-          make prereq V=99
+          make prereq V=99  # 详细输出检查日志
 
-      - name: 7. 编译固件（适配24.10，单核心保稳定）
+      - name: 7. 编译最新版固件（单核心保稳定）
         run: |
           cd $FIRMWARE_DIST
-          # 单核心编译（避免24.10源码编译时资源不足），保存详细日志
+          # 单核心编译（最新源码可能更耗资源）
           make -j1 V=s 2>&1 | tee build.log
 
-          # 验证固件是否生成
+          # 验证固件生成
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
           if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
-            echo "ERROR: 24.10版本固件编译失败！最后500行日志："
+            echo "ERROR: 最新版固件编译失败！最后500行日志："
             cat build.log | tail -500
             exit 1
           fi
-          echo "iStoreOS 24.10 固件编译成功！"
+          echo "iStoreOS最新版固件编译成功！"
 
-      - name: 8. 打包产物（含配置和日志）
+      - name: 8. 打包产物
         run: |
           cd $FIRMWARE_DIST
           mkdir -p output
-          # 复制核心固件文件
           cp $FIRMWARE_DIR/*.sysupgrade.bin output/
           cp $FIRMWARE_DIR/*.factory.img output/ 2>/dev/null
-          # 复制调试文件（便于后续排查版本问题）
-          cp .config output/final_config_24.10.config
-          cp build.log output/build_log_24.10.txt
-          echo "24.10版本产物列表："
+          cp .config output/final_config_latest.config
+          cp build.log output/build_log_latest.txt
+          echo "最新版产物列表："
           ls -l output/
 
-      - name: 9. 上传24.10版本产物（保留30天）
+      - name: 9. 上传最新版产物（保留30天）
         uses: actions/upload-artifact@v4
         with:
-          name: istoreos-24.10-xgp-firmware
+          name: istoreos-latest-xgp-firmware
           path: ${{ env.FIRMWARE_DIST }}/output/
           retention-days: 30
