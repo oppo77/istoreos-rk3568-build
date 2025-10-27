@@ -18,7 +18,7 @@ jobs:
       FIRMWARE_DIST: istoreos
       ISTOREOS_BRANCH: "istoreos-24.10"
       LOCAL_BUILD_DIR: "${{ github.workspace }}/build"
-      VENV_PATH: "${LOCAL_BUILD_DIR}/python-venv"  # 虚拟环境路径
+      VENV_PATH: "${LOCAL_BUILD_DIR}/python-venv"
       GITHUB_MIRROR: "https://bgithub.xyz"
 
     steps:
@@ -33,7 +33,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 2. 系统依赖+Python虚拟环境配置（强化创建逻辑）
+      - name: 2. 系统依赖+Python虚拟环境配置（移除--verbose参数）
         run: |
           echo "===== 安装系统基础依赖 ====="
           REQUIRED_PACKAGES="build-essential flex bison g++ gawk gcc-multilib \
@@ -52,43 +52,42 @@ jobs:
             fi
           done
 
-          # 验证python3-venv是否安装（虚拟环境依赖）
+          # 验证python3-venv是否安装
           echo "===== 验证python3-venv是否可用 ====="
           if ! dpkg -l | grep -q "python3-venv"; then
             echo "ERROR: python3-venv未安装，无法创建虚拟环境！"
             sudo apt install -y python3-venv --reinstall || exit 1
           fi
 
-          # 关键：确保虚拟环境父目录存在且有写入权限
+          # 准备虚拟环境目录
           echo "===== 准备虚拟环境目录 ====="
           echo "LOCAL_BUILD_DIR: ${{ env.LOCAL_BUILD_DIR }}"
           echo "VENV_PATH: ${{ env.VENV_PATH }}"
-          # 创建父目录（避免目录不存在导致创建失败）
           mkdir -p "$(dirname ${{ env.VENV_PATH }})"
-          # 检查权限（确保当前用户可写）
           if [ ! -w "$(dirname ${{ env.VENV_PATH }})" ]; then
             echo "ERROR: 目录 $(dirname ${{ env.VENV_PATH }}) 无写入权限！"
             sudo chown -R $USER:$USER "$(dirname ${{ env.VENV_PATH }})" || exit 1
           fi
 
-          # 创建虚拟环境（带详细日志）
+          # 创建虚拟环境（核心修复：移除--verbose参数，兼容低版本Python）
           echo "===== 创建Python虚拟环境 ====="
           if [ -d "${{ env.VENV_PATH }}" ]; then
             echo "清理旧虚拟环境..."
             rm -rf "${{ env.VENV_PATH }}"
           fi
-          # 显式指定python3路径，避免版本混淆
-          /usr/bin/python3 -m venv "${{ env.VENV_PATH }}" --verbose || {
-            echo "ERROR: 虚拟环境创建失败！检查python3-venv是否安装或目录权限"
+          # 移除--verbose，避免低版本Python不支持
+          /usr/bin/python3 -m venv "${{ env.VENV_PATH }}" || {
+            echo "ERROR: 虚拟环境创建失败！可能原因："
+            echo "1. python3-venv未正确安装（已尝试重新安装）"
+            echo "2. 目录权限不足（已尝试修复）"
+            echo "3. Python版本过低（建议升级到3.9+）"
             exit 1
           }
 
-          # 强制验证虚拟环境是否创建成功（核心修复点）
+          # 验证虚拟环境
           echo "===== 验证虚拟环境 ====="
           if [ ! -f "${{ env.VENV_PATH }}/bin/activate" ]; then
             echo "ERROR: 虚拟环境激活脚本不存在！路径：${{ env.VENV_PATH }}/bin/activate"
-            echo "可能原因：目录权限不足、python3-venv未安装、磁盘空间不足"
-            # 输出目录结构辅助排查
             ls -ld "$(dirname ${{ env.VENV_PATH }})"
             ls -l "${{ env.VENV_PATH }}" 2>/dev/null || echo "虚拟环境目录不存在"
             exit 1
@@ -173,10 +172,10 @@ jobs:
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
 
-          # 再次验证虚拟环境是否存在（双重保险）
+          # 再次验证虚拟环境
           echo "===== 再次验证虚拟环境 ====="
           if [ ! -f "${{ env.VENV_PATH }}/bin/activate" ]; then
-            echo "ERROR: 虚拟环境激活脚本仍不存在！路径：${{ env.VENV_PATH }}/bin/activate"
+            echo "ERROR: 虚拟环境激活脚本仍不存在！"
             exit 1
           fi
 
@@ -186,7 +185,7 @@ jobs:
             exit 1
           }
           if [ "$(which python3)" != "${{ env.VENV_PATH }}/bin/python3" ]; then
-            echo "ERROR: 虚拟环境激活异常！当前python3路径：$(which python3)"
+            echo "ERROR: 虚拟环境激活异常！"
             exit 1
           fi
 
