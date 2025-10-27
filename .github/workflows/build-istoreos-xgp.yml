@@ -1,0 +1,86 @@
+name: Build iStoreOS for XGP with 5G Support
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-istoreos-xgp.yml'
+      - 'configs/xgp-5g.config'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 480
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialization environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev lib32gcc-s1 \
+            libc6-dev-i386 libelf-dev libglib2.0-dev xmlto qemu-utils upx-ucl liblzma-dev file wget curl
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          echo "COMPILE_START_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Clone iStoreOS source
+        run: |
+          git clone --depth=1 https://github.com/istoreos/istoreos.git istoreos
+          cd istoreos
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Integrate 5G-Modem-Support
+        run: |
+          cd istoreos
+          # 移除可能存在的冲突驱动
+          rm -rf package/feeds/packages/quectel-MHI
+          rm -rf package/feeds/packages/qmi-utils
+          rm -rf package/feeds/packages/wwan
+          
+          # 克隆5G模块支持仓库
+          git clone --depth=1 https://github.com/Siriling/5G-Modem-Support.git package/5G-Modem-Support
+          
+          # 安装5G相关 feeds
+          ./scripts/feeds install -a -p 5G-Modem-Support
+
+      - name: Load custom configuration
+        run: |
+          cd istoreos
+          # 复制配置文件
+          cp $GITHUB_WORKSPACE/configs/xgp-5g.config .config
+          
+          # 确保配置生效
+          make defconfig
+
+      - name: Build firmware with log control
+        run: |
+          cd istoreos
+          # 设置日志限制防止中断
+          export BUILD_LOG=build.log
+          (make -j$(nproc) V=s 2>&1 | tee $BUILD_LOG) || (tail -n 500 $BUILD_LOG && exit 1)
+          # 压缩日志
+          gzip $BUILD_LOG
+
+      - name: Prepare output
+        run: |
+          mkdir -p output
+          cp istoreos/bin/targets/*/*/*.img.gz output/
+          cp istoreos/bin/targets/*/*/*.tar.gz output/
+          cp istoreos/build.log.gz output/
+          ls -lh output/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: istoreos-xgp-5g-firmware
+          path: output/
+          retention-days: 7
