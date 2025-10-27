@@ -1,4 +1,4 @@
-name: 本地编译iStoreOS-XGP（最终依赖终极修复）
+name: 本地编译iStoreOS-XGP（终极依赖修复）
 
 on:
   workflow_dispatch:
@@ -25,41 +25,38 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 2. 安装系统依赖（确保swig和Python基础库）
+      - name: 2. 安装系统依赖（含Python和主题依赖）
         run: |
-          echo "===== 安装核心依赖 ====="
+          echo "===== 安装所有必需依赖 ====="
           sudo apt update -y
-          sudo apt install -y \
-            build-essential python3 python3-pip python3-venv \
-            python3-dev python3-setuptools swig  # 确保这些包存在
-          # 验证swig和Python
-          command -v swig || { echo "ERROR: swig缺失"; exit 1; }
-          command -v python3 || { echo "ERROR: python3缺失"; exit 1; }
+          # 1. 基础编译依赖
+          sudo apt install -y build-essential python3 python3-pip python3-venv \
+            python3-dev python3-setuptools swig rsync
+          # 2. 解决luci-theme-argon缺失（iStoreOS默认主题）
+          sudo apt install -y git  # 确保git可用，用于拉取主题
 
-      - name: 3. 强制激活虚拟环境+强制制安装pyelftools（关键修复）
+      - name: 3. 强制安装pyelftools（系统级+虚拟环境双保险）
         run: |
-          echo "===== 强制配置虚拟环境 ====="
-          # 彻底清理清理旧环境，确保干净
+          echo "===== 双保险安装pyelftools ====="
+          # 方案1：系统级安装（确保u-boot无论如何都能找到）
+          sudo pip install pyelftools --upgrade --force-reinstall
+          # 方案2：虚拟环境安装（规范路径）
           rm -rf "${{ env.VENV_PATH }}"
           mkdir -p "$(dirname ${{ env.VENV_PATH }})"
           /usr/bin/python3 -m venv "${{ env.VENV_PATH }}" || exit 1
-
-          # 激活并强制安装pyelftools（指定显式指定虚拟环境pip）
           source "${{ env.VENV_PATH }}/bin/activate" || exit 1
-          echo "当前Python路径：$(which python3)"  # 必须显示为虚拟环境内的路径
-          echo "当前pip路径：$(which pip)"
-          pip install pyelftools --upgrade --force-reinstall || {
-            echo "ERROR: pyelftools安装失败，手动安装..."
-            # 备选方案：系统级安装（可能污染环境，但确保可用）
-            sudo pip install pyelftools --upgrade
-          }
+          pip install pyelftools --upgrade --force-reinstall
 
-          # 终极验证：确保能导入
-          if ! python3 -c "import elftools" &> /dev/null; then
-            echo "ERROR: 即使重装，pyelftools仍无法导入！"
-            # 输出调试信息
-            pip list | grep elftools
-            python3 -V
+          # 终极验证：双环境检查
+          echo "===== 验证pyelftools ====="
+          # 虚拟环境验证
+          if ! python3 -c "import elftools; print('虚拟环境pyelftools正常')" &> /dev/null; then
+            echo "ERROR: 虚拟环境pyelftools失败！"
+            exit 1
+          fi
+          # 系统级验证（u-boot可能调用系统Python）
+          if ! /usr/bin/python3 -c "import elftools; print('系统级pyelftools正常')" &> /dev/null; then
+            echo "ERROR: 系统级pyelftools失败！"
             exit 1
           fi
           deactivate
@@ -73,60 +70,74 @@ jobs:
           cd ${{ env.FIRMWARE_DIST }}
           git checkout ${{ env.ISTOREOS_BRANCH }} || exit 1
 
-      - name: 5. 同步软件源（移除无效依赖）
+      - name: 5. 同步软件源（精准修复所有依赖）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
-          # 替换国内源
+          # 替换国内源加速
           sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#g' feeds.conf.default
 
-          # 1. 彻底移除baidupcs-web相关（避免依赖错误）
-          sed -i '/third/d' feeds.conf.default  # 移除包含baidupcs-web的源
-          rm -rf package/feeds/third/luci-app-baidupcs-web  # 清理残留
+          # 修复1：安装luci-theme-argon（解决istoreos-files依赖）
+          echo "===== 安装luci-theme-argon ====="
+          ./scripts/feeds update luci || exit 1
+          ./scripts/feeds install luci-theme-argon || {
+            echo "WARN: 从源安装失败，手动克隆..."
+            git clone https://github.com/jerrykuku/luci-theme-argon.git package/luci-theme-argon
+          }
 
-          # 2. 修复QModem源依赖
+          # 修复2：QModem依赖（先查实际包名，再替换）
+          echo "===== 修复QModem依赖 ====="
+          # 清理旧QModem源
           sed -i '/qmodem/d' feeds.conf.default
           echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
-          ./scripts/feeds update -a -f || exit 1
-          ./scripts/feeds install -a -f || exit 1
+          ./scripts/feeds update qmodem || exit 1
+          ./scripts/feeds install -a -p qmodem || exit 1
 
-          # 3. 手动修正QModem的Makefile依赖（关键！）
-          QMODEM_MAKEFILE="package/feeds/qmodem/qmodem/Makefile"
-          if [ -f "$QMODEM_MAKEFILE" ]; then
-            echo "===== 修正QModem依赖为实际存在的包 ====="
-            # 替换不存在的quectel-CM-5G/quectel-cm为源中实际存在的包（如quectel_CM_5G_M）
-            sed -i 's/quectel-CM-5G/quectel_CM_5G_M/g' "$QMODEM_MAKEFILE"
-            sed -i 's/quectel-cm/quectel_CM_5G_M/g' "$QMODEM_MAKEFILE"
-            # 验证修改
-            grep -E "DEPENDS" "$QMODEM_MAKEFILE"
-          else
-            echo "ERROR: QModem Makefile不存在！"
+          # 关键：列出QModem源中实际的quectel包，避免猜包名！
+          echo "===== QModem源中实际的quectel包 ====="
+          QUECTEL_PACKAGES=$(ls package/feeds/qmodem/ | grep -i quectel)
+          echo "实际存在的quectel包：$QUECTEL_PACKAGES"
+          # 取第一个实际存在的quectel包（避免手动输入错误）
+          ACTUAL_QUECTEL_PKG=$(echo $QUECTEL_PACKAGES | awk '{print $1}')
+          if [ -z "$ACTUAL_QUECTEL_PKG" ]; then
+            echo "ERROR: QModem源中无quectel相关包！"
             exit 1
           fi
+          echo "将QModem依赖替换为：$ACTUAL_QUECTEL_PKG"
 
-      - name: 6. 导入配置并禁用无效包
+          # 修改QModem的Makefile，替换无效依赖
+          QMODEM_MAKEFILE="package/feeds/qmodem/qmodem/Makefile"
+          sed -i "s/quectel_CM_5G_M-M/$ACTUAL_QUECTEL_PKG/g" "$QMODEM_MAKEFILE"
+          sed -i "s/quectel_CM_5G_M/$ACTUAL_QUECTEL_PKG/g" "$QMODEM_MAKEFILE"
+          # 验证修改结果
+          echo "===== 修改后的QModem依赖 ====="
+          grep -E "DEPENDS|PKG_BUILD_DEPENDS" "$QMODEM_MAKEFILE"
+
+      - name: 6. 导入配置并清理无效项
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
           cp ${{ github.workspace }}/xgp-qmodem.config .config
 
-          # 禁用baidupcs-web（彻底避免）
-          sed -i 's/CONFIG_PACKAGE_luci-app-baidupcs-web=y/# CONFIG_PACKAGE_luci-app-baidupcs-web is not set/' .config
-          # 确保QModem依赖正确
-          sed -i 's/quectel-CM-5G/quectel_CM_5G_M/g' .config
-          sed -i 's/quectel-cm/quectel_CM_5G_M/g' .config
+          # 清理配置中无效的依赖名称
+          ACTUAL_QUECTEL_PKG=$(ls package/feeds/qmodem/ | grep -i quectel | awk '{print $1}')
+          sed -i "s/quectel_CM_5G_M-M/$ACTUAL_QUECTEL_PKG/g" .config
+          sed -i "s/quectel_CM_5G_M/$ACTUAL_QUECTEL_PKG/g" .config
+          # 确保luci-theme-argon启用
+          sed -i 's/# CONFIG_PACKAGE_luci-theme-argon is not set/CONFIG_PACKAGE_luci-theme-argon=y/' .config
 
           make defconfig || exit 1
 
-      - name: 7. 预检查依赖（确保pyelftools可用）
+      - name: 7. 预检查依赖（确保所有问题解决）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
-          # 必须激活虚拟环境，否则u-boot找不到pyelftools
+          # 激活虚拟环境（同时系统级已安装，双保险）
           source "${{ env.VENV_PATH }}/bin/activate" || exit 1
-          echo "编译使用的Python：$(which python3)"  # 确认是虚拟环境内的
+          echo "当前Python路径：$(which python3)"
+          echo "系统Python路径：/usr/bin/python3"
 
           # 运行prereq检查，输出详细日志
           make prereq V=s 2>&1 | tee prereq.log || {
-            echo "===== 依赖检查失败日志 ====="
-            grep -i "elftools\|quectel\|baidupcs" prereq.log
+            echo "===== 依赖检查失败，关键错误 ====="
+            grep -i "error\|missing\|failed\|elftools\|quectel\|argon" prereq.log
             exit 1
           }
           deactivate
@@ -137,14 +148,18 @@ jobs:
           source "${{ env.VENV_PATH }}/bin/activate" || exit 1
 
           CPU_CORES=$(nproc)
+          echo "使用 $CPU_CORES 核心编译..."
           make -j$CPU_CORES V=m 2>&1 | tee build.log
-          deactivate
 
+          deactivate
+          # 验证固件
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
           if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
+            echo "===== 编译失败，最后1000行日志 ====="
             cat build.log | tail -1000
             exit 1
           fi
+          echo "固件编译成功！"
 
       - name: 9. 打包产物
         run: |
@@ -152,3 +167,5 @@ jobs:
           mkdir -p $LOCAL_OUTPUT
           cp -r ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/* $LOCAL_OUTPUT/
           cp ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/*.log $LOCAL_OUTPUT/
+          echo "产物路径：$LOCAL_OUTPUT"
+          ls -l $LOCAL_OUTPUT
