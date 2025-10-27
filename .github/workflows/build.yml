@@ -1,0 +1,79 @@
+name: iStoreOS for XGP Build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      # 防止日志过大导致中断
+      BUILD_TIMEOUT: 1800
+      BUILD_LOG_LIMIT: 1000000  # 限制日志大小为 1MB
+
+    steps:
+    - name: Checkout iStoreOS source
+      uses: actions/checkout@v4
+      with:
+        ref: main
+        path: iStoreOS
+
+    - name: Checkout QModem
+      uses: actions/checkout@v4
+      with:
+        repository: FUjr/QModem
+        ref: main
+        path: QModem
+
+    - name: Set up dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libncurses-dev zlib1g-dev gawk git wget curl subversion libssl-dev libelf-dev libxml2-dev libxslt1-dev python3 python3-pip python3-setuptools python3-venv python3-dev libffi-dev libexpat1-dev liblz4-tool liblzo2-dev libzstd-dev libunwind8 libunwind-dev libtinfo5 libtinfo-dev libcap-dev libcap-dev libcap-ng-dev libseccomp-dev libseccomp-dev libmnl-dev libnl-genl-3-dev libnl-route-3-dev libnl-3-dev libnl-genl-3-dev libnl-genl-3-dev libnl-3-dev libnl-route-3-dev libnl-3-dev libnl-genl-3-dev libnl-3-dev libnl-route-3-dev
+
+    - name: Setup build environment
+      run: |
+        cd iStoreOS
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        mkdir -p ./target/linux/rockchip/patches
+        cp -r ../QModem/patches/* ./target/linux/rockchip/patches/
+        echo "CONFIG_PACKAGE_luci-app-wifi-hotspot=y" >> ./target/linux/rockchip/config-5.10
+        echo "CONFIG_PACKAGE_modemmanager-with-mbim=y" >> ./target/linux/rockchip/config-5.10
+        echo "CONFIG_PACKAGE_modemmanager-with-qmi=y" >> ./target/linux/rockchip/config-5.10
+        echo "CONFIG_PACKAGE_modemmanager-with-qrtr=y" >> ./target/linux/rockchip/config-5.10
+
+    - name: Apply config
+      run: |
+        cd iStoreOS
+        cp ../config.txt .config
+        make defconfig
+        echo "CONFIG_TARGET_ROOTFS_PARTSIZE=256" >> .config
+        echo "CONFIG_TARGET_KERNEL_PARTSIZE=64" >> .config
+
+    - name: Build iStoreOS
+      run: |
+        cd iStoreOS
+        # 添加 --no-verbose 参数防止日志过大
+        # 使用 tee 限制日志大小
+        make -j$(nproc) V=s | tee build.log | head -c ${{ env.BUILD_LOG_LIMIT }}
+        # 检查构建是否成功
+        if [ ! -f bin/targets/rockchip/armv8/xgp/squashfs-sysupgrade.bin ]; then
+          echo "Build failed"
+          exit 1
+        fi
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: iStoreOS-XGP
+        path: iStoreOS/bin/targets/rockchip/armv8/xgp/squashfs-sysupgrade.bin
+        retention-days: 30
+
+    - name: Upload build log
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-log
+        path: iStoreOS/build.log
+        retention-days: 30
