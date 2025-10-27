@@ -1,97 +1,115 @@
-name: Build iStoreOS for xgp (RK3568) with 5G-Modem-Support
+name: Build iStoreOS for xgp (RK3568 + 5G Modem)
 
 on:
   push:
     branches: [ main ]
     paths:
-      - '.config'  # 仅修改.config时触发编译
-  workflow_dispatch:  # 允许手动触发
+      - '.config'          # 仅修改配置文件时触发
+      - '.github/workflows/**' # 工作流文件修改时触发
+  workflow_dispatch:        # 允许手动触发（推荐测试用）
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  build-firmware:
+    runs-on: ubuntu-22.04   # 稳定兼容的编译环境
     env:
-      # 限制日志输出大小，防止中断（单个日志文件最大50MB，超过自动切割）
-      MAX_LOG_SIZE: "52428800"  # 50MB（字节）
+      ISTOREOS_REPO: "https://github.com/istoreos/istoreos.git"
+      ISTOREOS_BRANCH: "main"
+      5G_MODEM_REPO: "https://github.com/Siriling/5G-Modem-Support.git"
+      TARGET_ARCH: "rockchip/armv8" # RK3568属于armv8架构
+      LOG_DIR: "build-logs"         # 日志保存目录
 
     steps:
-      - name: Checkout local code
+      ###########################################################################
+      # 1. 拉取用户仓库（含自定义.config和files）
+      ###########################################################################
+      - name: Checkout user repo (config + custom files)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          path: "user-repo" # 单独目录存放，避免与源码冲突
 
-      - name: Install dependencies
+      ###########################################################################
+      # 2. 安装编译依赖（含5G模组编译所需基础依赖）
+      ###########################################################################
+      - name: Install build dependencies
         run: |
-          # 安装编译依赖，增加日志切割工具logrotate
           sudo apt update -y && sudo apt upgrade -y
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
-            python3-distutils rsync unzip zlib1g-dev file wget logrotate
-          # 配置logrotate限制编译日志大小
-          echo "/tmp/build-istoreos.log {
-            size ${MAX_LOG_SIZE}
-            rotate 5
-            compress
-            missingok
-            notifempty
-          }" | sudo tee /etc/logrotate.d/istoreos-build
+            python3-distutils rsync unzip zlib1g-dev file wget curl \
+            libfuse-dev libtool autoconf automake # 5G模组可能依赖的额外工具
 
-      - name: Clone iStoreOS source
+      ###########################################################################
+      # 3. 克隆iStoreOS源码并集成5G-Modem-Support模组
+      ###########################################################################
+      - name: Clone iStoreOS source & integrate 5G-Modem-Support
         run: |
-          git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
+          # 克隆iStoreOS源码（--depth=1减少体积，加速编译）
+          git clone --depth=1 -b $ISTOREOS_BRANCH $ISTOREOS_REPO "istoreos-src"
+          
+          # 集成5G-Modem-Support：两种方式任选其一（推荐方式1，优先级更高）
+          # 方式1：克隆到package目录，覆盖iStoreOS默认驱动
+          git clone --depth=1 $5G_MODEM_REPO "istoreos-src/package/5G-Modem-Support"
+          
+          # 方式2：添加到feeds（若方式1冲突，可注释方式1启用此方式）
+          # echo 'src-git 5gmodem '$5G_MODEM_REPO >> istoreos-src/feeds.conf.default
+
+      ###########################################################################
+      # 4. 加载自定义配置+更新软件源（确保5G驱动优先使用模组仓库）
+      ###########################################################################
+      - name: Load custom config & update feeds
+        run: |
           cd istoreos-src
-          # 克隆5G-Modem-Support仓库到package目录（替换原生5G驱动）
-          git clone https://github.com/Siriling/5G-Modem-Support.git \
-            package/5G-Modem-Support --depth=1
-
-      - name: Load custom config
-        run: |
-          # 复制自定义.config到源码目录（已替换5G驱动配置）
-          cp ./.config istoreos-src/.config
-          # 复制自定义files（如有），无则可删除此步骤
-          if [ -d "./files" ]; then
-            cp -r ./files istoreos-src/
+          
+          # 复制用户自定义.config（覆盖默认配置）
+          cp ../user-repo/.config ./.config
+          
+          # 复制用户自定义文件（如设备树、脚本等，无则可删除此步）
+          if [ -d ../user-repo/files ]; then
+            cp -r ../user-repo/files ./files
           fi
+          
+          # 更新软件源（含5G-Modem-Support）+ 安装所有包（优先5G模组仓库的驱动）
+          ./scripts/feeds update -a && ./scripts/feeds install -a
 
-      - name: Update and install feeds
+      ###########################################################################
+      # 5. 编译固件（日志切割+线程限制，防止日志过大中断）
+      ###########################################################################
+      - name: Build firmware (log split + thread limit)
         run: |
           cd istoreos-src
-          # 更新feeds并安装所有包（含5G-Modem-Support）
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          # 确保5G-Modem-Support包被正确识别
-          echo "Checking 5G-Modem-Support package..."
-          if [ -d "package/5G-Modem-Support" ]; then
-            echo "5G-Modem-Support package loaded successfully"
-          else
-            echo "Error: 5G-Modem-Support package not found!" && exit 1
-          fi
+          
+          # 创建日志目录
+          mkdir -p ../$LOG_DIR
+          
+          # 1. 生成最终配置（合并.config与5G模组依赖）
+          make -j$(($(nproc)/2)) defconfig 2>&1 | tee ../$LOG_DIR/defconfig.log
+          
+          # 2. 下载依赖包（显示详细日志，保存到文件）
+          make -j$(($(nproc)/2)) download V=s 2>&1 | tee ../$LOG_DIR/download.log
+          
+          # 3. 编译固件（核心：-j$(nproc/2)限制线程，避免日志暴增；日志保存到文件）
+          # 注：V=s显示详细日志，若需精简日志可改为V=q（但排查问题会困难）
+          make -j$(($(nproc)/2)) V=s 2>&1 | tee ../$LOG_DIR/build.log
 
-      - name: Build firmware (with log limit)
-        run: |
-          cd istoreos-src
-          # 生成配置并编译，日志重定向到文件并通过logrotate限制大小
-          make -j$(nproc) defconfig 2>&1 | tee -a /tmp/build-istoreos.log
-          make -j$(nproc) download V=s 2>&1 | tee -a /tmp/build-istoreos.log
-          # 手动触发logrotate确保日志不超限
-          sudo logrotate -f /etc/logrotate.d/istoreos-build
-          make -j$(nproc) V=s 2>&1 | tee -a /tmp/build-istoreos.log
-          # 再次触发logrotate处理最终日志
-          sudo logrotate -f /etc/logrotate.d/istoreos-build
-
-      - name: Upload firmware
+      ###########################################################################
+      # 6. 上传固件（xgp设备最终产物）
+      ###########################################################################
+      - name: Upload firmware (xgp device)
         uses: actions/upload-artifact@v4
         with:
-          name: istoreos-xgp-rk3568-firmware
+          name: istoreos-xgp-firmware (RK3568 + 5G)
           path: |
-            istoreos-src/bin/targets/rockchip/armv8/*.img
-            istoreos-src/bin/targets/rockchip/armv8/*.tar.gz
-          retention-days: 7  # 固件保留7天，可按需调整
+            istoreos-src/bin/targets/${{ env.TARGET_ARCH }}/*.img
+            istoreos-src/bin/targets/${{ env.TARGET_ARCH }}/*.tar.gz
+          retention-days: 30 # 固件保留30天，可按需调整
 
-      - name: Upload build log (for debug)
+      ###########################################################################
+      # 7. 上传编译日志（方便排查编译失败问题）
+      ###########################################################################
+      - name: Upload build logs (for debug)
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: /tmp/build-istoreos.log*
-          retention-days: 3  # 日志保留3天
+          name: istoreos-xgp-build-logs
+          path: ${{ env.LOG_DIR }}/*.log
+          retention-days: 14 # 日志保留14天，可按需调整
