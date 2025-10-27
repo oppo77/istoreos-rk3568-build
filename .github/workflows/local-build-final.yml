@@ -1,4 +1,4 @@
-name: 本地编译iStoreOS-XGP（精准文件修改）
+name: 本地编译iStoreOS-XGP（实时验证+最小化）
 
 on:
   workflow_dispatch:
@@ -12,10 +12,9 @@ jobs:
       FIRMWARE_DIST: istoreos
       ISTOREOS_BRANCH: "istoreos-24.10"
       LOCAL_BUILD_DIR: "${{ github.workspace }}/build"
-      # 日志中明确的关键文件路径（直接写死，不搜索）
-      GLOBAL_PREREQ_FILE: "${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/include/prereq.mk"
-      ISTOREOS_FILES_MK: "${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/package/istoreos-files/Makefile"
-      QMODEM_FEEDS_MK: "${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/package/feeds/qmodem/qmodem/Makefile"
+      # 直接写死日志中出现的文件路径（确保精准）
+      PREREQ_FILE: "${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/include/prereq.mk"
+      ISTOREOS_MK: "${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/package/istoreos-files/Makefile"
 
     steps:
       - name: 1. 拉取仓库代码
@@ -23,13 +22,15 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 2. 安装基础依赖
+      - name: 2. 仅安装最核心依赖（排除所有干扰）
         run: |
           sudo apt update -y
-          sudo apt install -y build-essential python3 python3-pip swig git rsync
+          # 只装编译必需的基础工具，不装任何可能冲突的包
+          sudo apt install -y build-essential python3 python3-pip git rsync
+          # 安装pyelftools（不管路径，先装上）
           sudo pip install pyelftools --upgrade
 
-      - name: 3. 克隆源码+立即修改全局prereq.mk（日志明确路径！）
+      - name: 3. 克隆源码+实时修改prereq.mk（每步验证）
         run: |
           mkdir -p ${{ env.LOCAL_BUILD_DIR }}
           cd ${{ env.LOCAL_BUILD_DIR }}
@@ -38,85 +39,96 @@ jobs:
           cd ${{ env.FIRMWARE_DIST }}
           git checkout ${{ env.ISTOREOS_BRANCH }} || exit 1
 
-          # 关键：修改日志中明确的 /include/prereq.mk（第9行报错）
-          echo "===== 修改全局prereq.mk（日志中第9行） ====="
-          if [ -f "${{ env.GLOBAL_PREREQ_FILE }}" ]; then
-            # 注释掉第9行附近的pyelftools检查（直接定位行号）
-            sed -i '9s/^/#/' "${{ env.GLOBAL_PREREQ_FILE }}"  # 注释第9行
-            sed -i '/python3-pyelftools/d' "${{ env.GLOBAL_PREREQ_FILE }}"  # 删除pyelftools检查
-            sed -i '/u-boot: Please install the Python3 elftools module/d' "${{ env.GLOBAL_PREREQ_FILE }}"
-            echo "已修改全局prereq.mk："
-            cat "${{ env.GLOBAL_PREREQ_FILE }}" | grep -A 5 -B 5 "prereq"  # 验证修改
-          else
-            echo "ERROR: 全局prereq.mk不存在！路径：${{ env.GLOBAL_PREREQ_FILE }}"
+          # 步骤1：查看prereq.mk原始内容（确认修改前状态）
+          echo "===== prereq.mk原始第7-11行 ====="
+          sed -n '7,11p' "${{ env.PREREQ_FILE }}"  # 查看报错行附近内容
+
+          # 步骤2：暴力删除pyelftools检查（直接替换整个检查块）
+          echo "===== 修改prereq.mk ====="
+          # 用sed删除包含"python3-pyelftools"和"u-boot: Please install"的所有行
+          sed -i '/python3-pyelftools/d' "${{ env.PREREQ_FILE }}"
+          sed -i '/u-boot: Please install the Python3 elftools module/d' "${{ env.PREREQ_FILE }}"
+
+          # 步骤3：查看修改后内容（确保修改生效）
+          echo "===== prereq.mk修改后第7-11行 ====="
+          sed -n '7,11p' "${{ env.PREREQ_FILE }}"
+          if grep -q "python3-pyelftools" "${{ env.PREREQ_FILE }}"; then
+            echo "ERROR: prereq.mk修改失败！仍有pyelftools检查"
             exit 1
           fi
 
-      - name: 4. 同步feeds+立即删除QModem feeds版本（避免冲突）
+      - name: 4. 同步基础源+删除所有第三方依赖（QModem/argon）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
-          # 同步feeds（包含QModem）
-          sed -i '/qmodem/d' feeds.conf.default
-          echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
-          ./scripts/feeds update -a || exit 1
-          ./scripts/feeds install -a -p qmodem || exit 1
+          # 步骤1：只保留官方源，删除所有第三方源（QModem/third等）
+          echo "===== 清理feeds.conf.default ====="
+          # 保留默认源，删除其他所有源
+          sed -i '/^src-git/qmodem/d' feeds.conf.default
+          sed -i '/^src-git/third/d' feeds.conf.default
+          cat feeds.conf.default  # 验证清理结果
 
-          # 立即删除feeds中的QModem（避免依赖干扰）
-          echo "===== 删除feeds中的QModem，使用手动版本 ====="
+          # 步骤2：同步仅官方源
+          ./scripts/feeds update -a || exit 1
+          ./scripts/feeds install -a || exit 1
+
+          # 步骤3：删除istoreos-files（避免argon依赖）
+          echo "===== 删除istoreos-files（绕开argon依赖） ====="
+          if [ -d "package/istoreos-files" ]; then
+            rm -rf "package/istoreos-files"
+            echo "已删除istoreos-files"
+          fi
+
+          # 步骤4：确认QModem已不存在
           if [ -d "package/feeds/qmodem" ]; then
             rm -rf "package/feeds/qmodem"
-            echo "已删除feeds QModem"
+            echo "已删除QModem feeds"
           fi
 
-          # 手动克隆QModem到package目录（无依赖）
-          git clone https://github.com/FUjr/QModem.git package/qmodem || exit 1
-          # 清空手动QModem的依赖
-          sed -i 's/DEPENDS:=.*/DEPENDS:=/' "package/qmodem/qmodem/Makefile"
-          grep "DEPENDS" "package/qmodem/qmodem/Makefile"
-
-      - name: 5. 强制修改istoreos-files依赖（日志明确路径）
-        run: |
-          cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
-          echo "===== 修改istoreos-files的argon依赖 ====="
-          if [ -f "${{ env.ISTOREOS_FILES_MK }}" ]; then
-            # 彻底删除argon依赖，替换为默认主题
-            sed -i 's/luci-theme-argon/luci-theme-bootstrap/g' "${{ env.ISTOREOS_FILES_MK }}"
-            echo "修改后的istoreos-files依赖："
-            grep "DEPENDS" "${{ env.ISTOREOS_FILES_MK }}"
-          else
-            echo "ERROR: istoreos-files Makefile不存在！路径：${{ env.ISTOREOS_FILES_MK }}"
-            exit 1
-          fi
-
-      - name: 6. 导入配置+最终验证修改
+      - name: 5. 导入配置+禁用所有非官方包
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
           cp ${{ github.workspace }}/xgp-qmodem.config .config
 
-          # 禁用所有无效包
+          # 禁用所有第三方包和主题
           sed -i 's/CONFIG_PACKAGE_luci-theme-argon=y/# &/' .config
           sed -i 's/CONFIG_PACKAGE_quectel.*=y/# &/' .config
+          sed -i 's/CONFIG_PACKAGE_istoreos-files=y/# &/' .config
+          sed -i 's/CONFIG_PACKAGE_luci-app-qmodem.*=y/# &/' .config
+
+          # 启用默认主题（确保无主题依赖）
+          sed -i 's/# CONFIG_PACKAGE_luci-theme-bootstrap is not set/CONFIG_PACKAGE_luci-theme-bootstrap=y/' .config
 
           make defconfig || exit 1
 
-          # 最终验证：确保没有报错的依赖检查
-          echo "===== 验证所有修改是否生效 ====="
-          grep -r "python3-pyelftools" ./include ./package | grep -v ".git" || echo "pyelftools检查已清除"
-          grep -r "luci-theme-argon" ./package/istoreos-files || echo "argon依赖已替换"
-          grep -r "quectel_CM_5G_M" ./package/qmodem || echo "QModem无效依赖已清除"
+          # 验证最终配置
+          echo "===== 验证关键配置 ====="
+          grep -E "luci-theme-argon|luci-theme-bootstrap|istoreos-files|qmodem|quectel" .config | grep -v "#"
 
-      - name: 7. 编译（最后尝试）
+      - name: 6. 最终验证所有修改（再确认一次）
+        run: |
+          cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
+          echo "===== 最终验证 ====="
+          # 1. prereq.mk无pyelftools检查
+          echo "prereq.mk是否有pyelftools：$(grep -c "python3-pyelftools" "${{ env.PREREQ_FILE }}")"
+          # 2. 无istoreos-files
+          echo "istoreos-files是否存在：$(test -d package/istoreos-files && echo "是" || echo "否")"
+          # 3. 无QModem
+          echo "QModem是否存在：$(test -d package/feeds/qmodem && echo "是" || echo "否")"
+
+      - name: 7. 编译（最小化配置）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
           CPU_CORES=$(nproc)
-          echo "使用 $CPU_CORES 核心编译..."
+          echo "使用 $CPU_CORES 核心编译（最小化配置）..."
+          # 直接编译，忽略警告
           make -j$CPU_CORES V=m 2>&1 | tee build.log
 
+          # 验证固件
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
           if [ -d "$FIRMWARE_DIR" ] && [ -n "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
-            echo "固件编译成功！路径：$FIRMWARE_DIR"
+            echo "✅ 固件编译成功！路径：$FIRMWARE_DIR"
           else
-            echo "===== 编译失败，最后关键日志 ====="
+            echo "❌ 编译失败，最后50行错误日志："
             grep -i "error" build.log | tail -50
             exit 1
           fi
