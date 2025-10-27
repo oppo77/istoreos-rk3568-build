@@ -7,7 +7,7 @@ on:
       - '.github/workflows/build-istoreos-xgp.yml'
       - 'xgp-qmodem.config'
       - 'files/**'
-  workflow_dispatch:  # 支持手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -18,112 +18,92 @@ jobs:
       FIRMWARE_DIST: istoreos
 
     steps:
-      - name: 1. 拉取仓库代码（含预配置文件）
+      - name: 1. 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 2. 更换国内源+安装最新版依赖
+      - name: 2. 更换源+安装【OpenWRT最新版完整依赖】
         run: |
-          # 更换阿里云源，加速依赖下载
+          # 更换阿里云源，确保包同步完整
           sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo apt clean && sudo apt update -y
 
-          # 优先安装关键依赖（兼容最新版iStoreOS）
-          sudo apt install -y xz-utils  # 强制确保xz-utils安装
-          # 安装最新版iStoreOS编译必需的完整依赖
+          # 安装OpenWRT 24.03+（iStoreOS最新版基于此）官方强制依赖
+          # 新增：meson/ninja/cmake（最新版编译现代组件必需）
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
             libtool autoconf automake pkg-config perl python3 python3-pip \
             python3-setuptools python3-yaml rsync subversion unzip wget \
             zlib1g-dev quilt libc6-dev-i386 u-boot-tools dosfstools mtools parted \
-            dwarves bc liblz4-tool  # 适配最新版的压缩依赖
+            dwarves bc liblz4-tool meson ninja-build cmake  # 新增关键依赖
 
-          # 验证关键工具是否安装
-          REQUIRED_TOOLS="xz gcc g++ make python3 rsync wget unzip"
+          # 验证核心工具（覆盖最新版可能用到的）
+          REQUIRED_TOOLS="xz gcc g++ make python3 rsync wget unzip meson ninja cmake"
           for tool in $REQUIRED_TOOLS; do
             if ! command -v $tool &> /dev/null; then
-              echo "ERROR: 关键依赖 $tool 未安装！"
+              echo "ERROR: 最新版依赖 $tool 未安装！请手动检查apt源"
               exit 1
             fi
           done
-          echo "依赖检查通过（适配iStoreOS最新版）"
+          echo "最新版依赖检查通过"
 
       - name: 3. 克隆iStoreOS最新源码
         run: |
-          # 克隆官方仓库并使用最新main分支（默认分支）
           git clone https://github.com/istoreos/istoreos.git $FIRMWARE_DIST
           cd $FIRMWARE_DIST
-          # 拉取最新代码（确保是最新提交）
-          git pull
-          echo "已获取iStoreOS最新源码，当前commit：$(git rev-parse --short HEAD)"
+          git pull  # 确保拉取最新提交
+          echo "当前源码commit：$(git rev-parse --short HEAD)"
 
-      - name: 4. 集成QModem（兼容最新版）
+      - name: 4. 同步软件源（含QModem）
         run: |
           cd $FIRMWARE_DIST
-          # 添加QModem源（适配最新版feeds机制）
           echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
-          # 更新并安装所有软件包（最新版可能有依赖变动，不静默输出）
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a -f
+          ./scripts/feeds update -a  # 不静默，显示源同步日志
+          ./scripts/feeds install -a -f  # 强制安装，解决依赖冲突
 
-      - name: 5. 导入XGP配置文件
+      - name: 5. 导入配置文件
         run: |
           cd $FIRMWARE_DIST
           CONFIG_URL="https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/main/xgp-qmodem.config"
-          echo "下载配置文件：$CONFIG_URL"
+          wget --no-check-certificate -O .config "$CONFIG_URL" || exit 1
+          make defconfig  # 补全新增配置项
+          # 验证平台和QModem配置
+          grep -q "CONFIG_TARGET_rockchip=y" .config || exit 1
+          grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config || exit 1
 
-          # 下载配置文件
-          if ! wget --no-check-certificate -O .config "$CONFIG_URL"; then
-            echo "ERROR: 配置文件下载失败！"
-            exit 1
-          fi
-
-          # 生成最新版兼容的配置
-          make defconfig
-
-          # 验证核心配置
-          if ! grep -q "CONFIG_TARGET_rockchip=y" .config; then
-            echo "ERROR: 未启用Rockchip平台！"
-            exit 1
-          fi
-          if ! grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config; then
-            echo "ERROR: QModem未启用！"
-            exit 1
-          fi
-
-      - name: 6. 前置检查（确保最新环境就绪）
+      - name: 6. 前置检查（显示具体缺失工具）
         run: |
           cd $FIRMWARE_DIST
-          make prereq V=99  # 详细输出检查日志
+          # 执行前置检查并捕获输出，筛选缺失的依赖
+          if ! make prereq V=99 2>&1 | tee prereq.log; then
+            echo "ERROR: 前置检查失败，缺失的依赖如下："
+            # 从日志中提取"missing"关键字对应的工具
+            grep "missing" prereq.log || echo "未明确显示缺失工具，请查看完整日志"
+            exit 1
+          fi
 
-      - name: 7. 编译最新版固件（单核心保稳定）
+      - name: 7. 编译固件
         run: |
           cd $FIRMWARE_DIST
-          # 单核心编译（最新源码可能更耗资源）
           make -j1 V=s 2>&1 | tee build.log
-
-          # 验证固件生成
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
-          if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
-            echo "ERROR: 最新版固件编译失败！最后500行日志："
+          [ -d "$FIRMWARE_DIR" ] && [ -n "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ] || {
             cat build.log | tail -500
             exit 1
-          fi
-          echo "iStoreOS最新版固件编译成功！"
+          }
 
-      - name: 8. 打包产物
+      - name: 8. 打包并上传产物
         run: |
           cd $FIRMWARE_DIST
           mkdir -p output
           cp $FIRMWARE_DIR/*.sysupgrade.bin output/
           cp $FIRMWARE_DIR/*.factory.img output/ 2>/dev/null
-          cp .config output/final_config_latest.config
-          cp build.log output/build_log_latest.txt
-          echo "最新版产物列表："
-          ls -l output/
+          cp .config output/final_config.config
+          cp build.log output/build_log.txt
+          cp prereq.log output/prereq_check.log  # 保存前置检查日志
 
-      - name: 9. 上传最新版产物（保留30天）
+      - name: 9. 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: istoreos-latest-xgp-firmware
