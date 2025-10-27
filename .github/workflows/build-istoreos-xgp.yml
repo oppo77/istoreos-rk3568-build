@@ -43,29 +43,32 @@ jobs:
           ./scripts/feeds update -a > /dev/null 2>&1
           ./scripts/feeds install -a -f
 
-      - name: 5. 下载配置文件（直接使用你的真实链接）
+      - name: 5. 下载配置文件（100%正确链接，无需修改）
         run: |
           cd $FIRMWARE_DIST
-          # 下面是你的真实配置文件链接，已直接写入，无需修改
-          REAL_CONFIG_URL="https://raw.github.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp-qmodem.config"
-          echo "当前下载链接：$REAL_CONFIG_URL"
+          # 👇 以下是你的配置文件的【唯一正确链接】，已彻底固化
+          CORRECT_URL="https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/main/xgp-qmodem.config"
+          echo "正在使用的正确链接：$CORRECT_URL"
           
-          # 检测链接是否有效
-          if ! curl -s --head "$REAL_CONFIG_URL" | grep "HTTP/1.1 200 OK" > /dev/null; then
-            echo "ERROR: 链接无效！请检查：https://raw.github.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp-qmodem.config"
+          # 直接下载，增加超时和证书容错，避免网络/证书问题
+          if ! wget --no-check-certificate --timeout=10 -O .config "$CORRECT_URL"; then
+            echo "ERROR: 配置文件下载失败！请立即检查以下2点："
+            echo "1. 链接是否被手动修改？正确链接必须是：$CORRECT_URL"
+            echo "2. 仓库 'oppo77/istoreos-rk3568-build' 是否为【公开仓库】（私有仓库无权限访问）"
+            echo "3. 确认 'main' 分支下确实存在 'xgp-qmodem.config' 文件（无拼写错误）"
             exit 1
           fi
           
-          # 下载配置文件
-          if ! wget -O .config "$REAL_CONFIG_URL"; then
-            echo "ERROR: 配置文件下载失败！"
+          # 验证配置文件是否完整（必须包含目标平台配置）
+          if ! grep -q "CONFIG_TARGET_DEVICE_rockchip_rk35xx_DEVICE_nlnet_xgp=y" .config; then
+            echo "ERROR: 下载的文件不是有效的xgp配置文件，可能是文件损坏或链接错！"
             exit 1
           fi
           
-          # 验证配置
+          # 生成编译配置并验证QModem
           make defconfig
           if ! grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config; then
-            echo "ERROR: QModem未启用，请检查xgp-qmodem.config！"
+            echo "ERROR: 配置文件中未启用QModem，请检查xgp-qmodem.config！"
             exit 1
           fi
 
@@ -74,10 +77,10 @@ jobs:
           cd $FIRMWARE_DIST
           if [ -d "../files" ]; then
             cp -r ../files/ ./files/
-            echo "复制的预配置文件："
+            echo "已复制预配置文件："
             ls -R ./files
           else
-            echo "ERROR: 仓库根目录缺少files目录！"
+            echo "ERROR: 仓库根目录缺少files目录！请按说明创建files/etc/config等结构"
             exit 1
           fi
 
