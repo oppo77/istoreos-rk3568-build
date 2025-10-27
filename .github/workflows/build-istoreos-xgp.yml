@@ -1,197 +1,218 @@
-name: 本地编译iStoreOS-XGP（Ubuntu专属）
+name: 本地编译iStoreOS-XGP（最终稳定版）
 
-# 触发条件：手动触发 + 配置文件修改时自动触发
 on:
-  workflow_dispatch:  # 本地编译优先手动触发，灵活控制
+  workflow_dispatch:  # 优先手动触发，灵活控制
   push:
     branches: [ main ]
     paths:
-      - '.github/workflows/local-build.yml'
+      - '.github/workflows/local-build-final.yml'
       - 'xgp-qmodem.config'
       - 'files/**'
 
 jobs:
   local-build:
-    # 关键：指定使用本地 self-hosted Runner（需提前安装注册）
-    runs-on: self-hosted
+    runs-on: self-hosted  # 本地Runner
     env:
       TARGET_PLATFORM: rockchip
       TARGET_SUBPLATFORM: rk35xx
       FIRMWARE_DIST: istoreos
-      ISTOREOS_BRANCH: "istoreos-24.10"  # 官方稳定分支，避免编译bug
-      LOCAL_BUILD_DIR: "${{ github.workspace }}/build"  # 本地编译目录
+      ISTOREOS_BRANCH: "istoreos-24.10"  # 官方稳定分支
+      LOCAL_BUILD_DIR: "${{ github.workspace }}/build"  # 本地编译根目录
+      VENV_PATH: "${{ env.LOCAL_BUILD_DIR }}/python-venv"  # Python虚拟环境路径
 
     steps:
-      - name: 1. 拉取仓库代码（含配置文件和预配置）
+      - name: 1. 拉取仓库代码（含配置文件）
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1  # 仅拉取最新代码，加快速度
+          fetch-depth: 1  # 仅拉取最新代码
 
-      - name: 2. 检查并补全本地依赖（适配Ubuntu）
+      - name: 2. 系统依赖+Python虚拟环境配置（解决PEP 668）
         run: |
-          echo "===== 检查本地系统依赖 ====="
-          # 必需依赖列表（本地Ubuntu可能已安装，未安装则自动补充）
+          echo "===== 安装系统基础依赖 ====="
+          # 核心系统依赖（含Python虚拟环境工具）
           REQUIRED_PACKAGES="build-essential flex bison g++ gawk gcc-multilib \
             gettext git libncurses5-dev libssl-dev libelf-dev python3 python3-pip \
+            python3-venv  # 关键：安装Python虚拟环境支持
             rsync unzip wget zlib1g-dev quilt u-boot-tools squashfs-tools \
             meson ninja-build cmake device-tree-compiler liblz4-tool"
 
-          # 检查并安装缺失的依赖
+          # 安装缺失的系统包
           for pkg in $REQUIRED_PACKAGES; do
             if ! dpkg -l | grep -q "$pkg"; then
-              echo "缺失依赖 $pkg，正在安装..."
+              echo "安装缺失依赖：$pkg"
               sudo apt update -y && sudo apt install -y "$pkg"
             fi
           done
 
-          # 检查Python关键模块（U-Boot编译必需）
-          echo "===== 检查Python模块 ====="
-          if ! python3 -c "import elftools" &> /dev/null; then
-            echo "缺失pyelftools模块，正在安装..."
-            python3 -m pip install pyelftools --upgrade --user
+          echo "===== 创建Python虚拟环境（隔离系统Python） ====="
+          # 清理旧环境（若存在）
+          if [ -d "$VENV_PATH" ]; then
+            rm -rf "$VENV_PATH"
+          fi
+          # 创建新虚拟环境
+          python3 -m venv "$VENV_PATH"
+          # 验证虚拟环境创建成功
+          if [ ! -f "$VENV_PATH/bin/activate" ]; then
+            echo "ERROR: 虚拟环境创建失败！"
+            exit 1
           fi
 
-          # 验证核心工具是否可用
+          echo "===== 在虚拟环境中安装Python依赖 ====="
+          # 激活虚拟环境（后续命令使用该环境）
+          source "$VENV_PATH/bin/activate"
+          # 安装U-Boot必需的pyelftools（仅在虚拟环境中）
+          if ! python3 -c "import elftools" &> /dev/null; then
+            echo "安装pyelftools..."
+            pip install pyelftools --upgrade
+          fi
+          # 验证依赖安装
+          if ! python3 -c "import elftools" &> /dev/null; then
+            echo "ERROR: pyelftools安装失败！"
+            exit 1
+          fi
+          # 退出虚拟环境（避免影响后续步骤）
+          deactivate
+
+          echo "===== 验证核心工具 ====="
           REQUIRED_TOOLS="gcc make python3 wget unzip mksquashfs"
           for tool in $REQUIRED_TOOLS; do
             if ! command -v $tool &> /dev/null; then
-              echo "ERROR: 核心工具 $tool 不可用！请手动安装"
+              echo "ERROR: 核心工具 $tool 未安装！"
               exit 1
             fi
           done
-          echo "===== 所有依赖检查通过 ====="
+          echo "===== 依赖配置完成 ====="
 
-      - name: 3. 缓存编译资源（本地加速，避免重复下载）
+      - name: 3. 缓存编译资源（加速二次编译）
         uses: actions/cache@v3
         with:
-          # 缓存下载的组件源码和软件源（第二次编译省30%时间）
           path: |
             ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/dl
             ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/feeds
-          # 缓存key：基于系统+分支+配置文件哈希，配置变了才更新缓存
           key: ${{ runner.os }}-istoreos-${{ env.ISTOREOS_BRANCH }}-${{ hashFiles('xgp-qmodem.config') }}
           restore-keys: |
             ${{ runner.os }}-istoreos-${{ env.ISTOREOS_BRANCH }}-
 
-      - name: 4. 克隆iStoreOS稳定分支（本地编译目录）
+      - name: 4. 克隆/更新iStoreOS稳定分支
         run: |
-          # 创建本地编译目录（避免与仓库代码混淆）
           mkdir -p ${{ env.LOCAL_BUILD_DIR }}
           cd ${{ env.LOCAL_BUILD_DIR }}
 
-          # 克隆或更新iStoreOS源码（本地克隆一次即可，后续pull更新）
+          # 克隆源码（首次）或更新（后续）
           if [ ! -d "${{ env.FIRMWARE_DIST }}" ]; then
             git clone https://github.com/istoreos/istoreos.git ${{ env.FIRMWARE_DIST }}
           fi
-
-          # 切换到稳定分支并拉取最新代码
           cd ${{ env.FIRMWARE_DIST }}
           git checkout ${{ env.ISTOREOS_BRANCH }}
-          git pull
-          echo "===== 当前源码信息 ====="
-          echo "分支：$(git branch --show-current)"
-          echo "最新commit：$(git rev-parse --short HEAD)"
+          git pull  # 拉取最新代码
 
-      - name: 5. 同步软件源（国内优化，含QModem）
+          echo "当前分支：$(git branch --show-current)"
+          echo "最新Commit：$(git rev-parse --short HEAD)"
+
+      - name: 5. 同步软件源（国内优化+QModem）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
 
-          # 关键：替换为国内源（中科大/阿里云），解决本地下载慢
+          # 替换为国内源（中科大），加速下载
           sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#g' feeds.conf.default
           sed -i 's#https://mirrors.cernet.edu.cn#https://mirrors.ustc.edu.cn#g' feeds.conf.default
 
-          # 添加QModem 5G插件源（本地同步更快）
+          # 添加QModem源（若未添加）
           if ! grep -q "qmodem" feeds.conf.default; then
             echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
           fi
 
-          # 同步软件源（本地网络快，无需静默，显示进度）
-          echo "===== 同步软件源 ====="
+          # 同步源并安装包
           ./scripts/feeds update -a
-          # 强制安装所有包（确保QModem依赖完整）
           ./scripts/feeds install -a -f
-          echo "===== 软件源同步完成 ====="
+          echo "软件源同步完成"
 
-      - name: 6. 导入XGP设备配置文件
+      - name: 6. 导入设备配置文件
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
-
-          # 从仓库复制配置文件（本地路径，无需wget下载）
+          # 复制本地配置文件
           cp ${{ github.workspace }}/xgp-qmodem.config .config
-
-          # 生成完整编译配置（自动补全依赖）
+          # 生成完整配置
           make defconfig
 
-          # 验证核心配置是否生效
-          echo "===== 验证配置 ====="
+          # 验证关键配置
           if ! grep -q "CONFIG_TARGET_rockchip=y" .config; then
-            echo "ERROR: 配置文件未指定Rockchip平台！"
+            echo "ERROR: 平台配置错误！"
             exit 1
           fi
           if ! grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config; then
-            echo "ERROR: QModem插件未启用！"
+            echo "ERROR: QModem未启用！"
             exit 1
           fi
-          echo "===== 配置验证通过 ====="
 
-      - name: 7. 本地多核编译固件（自动适配CPU核心）
+      - name: 7. 本地多核编译（激活虚拟环境）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
 
-          # 显示本地CPU核心数，确认编译参数
-          CPU_CORES=$(nproc)
-          echo "===== 本地CPU核心数：$CPU_CORES，使用 -j$CPU_CORES 编译 ====="
+          # 关键：激活Python虚拟环境（确保编译时使用正确的依赖）
+          echo "激活虚拟环境：$VENV_PATH"
+          source "$VENV_PATH/bin/activate"
+          # 验证虚拟环境是否生效
+          if [ "$(which python3)" != "$VENV_PATH/bin/python3" ]; then
+            echo "ERROR: 虚拟环境激活失败！"
+            exit 1
+          fi
 
-          # 编译：多核+精简日志+进度提示（每10分钟输出当前步骤）
-          # 超时保护：本地编译最长3小时（足够完成）
+          # 编译参数：使用全部CPU核心
+          CPU_CORES=$(nproc)
+          echo "使用 $CPU_CORES 核心编译..."
+
+          # 编译+进度提示+超时保护（3小时）
           timeout 180m bash -c "
             make -j$CPU_CORES V=m 2>&1 | tee build.log &
             PID=\$!
-            # 每10分钟输出一次进度，避免不知道卡在哪
+            # 每10分钟输出一次进度
             while kill -0 \$PID 2>/dev/null; do
-              echo \"===== 编译中（$(date +%H:%M:%S)），当前进度：\"
+              echo \"===== 编译中（$(date +%H:%M:%S)）=====\"
               grep -E \"Compiling|Linking|Installing\" build.log | tail -5
               sleep 600
             done
             wait \$PID
           "
 
-          # 验证固件是否生成
+          # 退出虚拟环境
+          deactivate
+
+          # 验证固件生成
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
           if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
             echo "ERROR: 编译失败！最后1000行日志："
             cat build.log | tail -1000
             exit 1
           fi
-          echo "===== 固件编译成功！ ====="
+          echo "固件编译成功！"
 
-      - name: 8. 打包产物（本地+GitHub双备份）
+      - name: 8. 打包产物（本地+GitHub备份）
         run: |
-          # 本地产物目录（方便直接取用）
-          LOCAL_OUTPUT_DIR="${{ github.workspace }}/local-firmware-output"
-          mkdir -p $LOCAL_OUTPUT_DIR
+          # 本地产物目录（直接取用）
+          LOCAL_OUTPUT="${{ github.workspace }}/local-firmware"
+          mkdir -p $LOCAL_OUTPUT
 
-          # GitHub产物目录（上传到Actions Artifacts）
-          GITHUB_OUTPUT_DIR="${{ env.LOCAL_BUILD_DIR }}/output"
-          mkdir -p $GITHUB_OUTPUT_DIR
+          # GitHub上传目录
+          REMOTE_OUTPUT="${{ env.LOCAL_BUILD_DIR }}/output"
+          mkdir -p $REMOTE_OUTPUT
 
-          # 复制核心文件
+          # 复制固件及日志
           FIRMWARE_DIR="${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
-          cp $FIRMWARE_DIR/*.sysupgrade.bin $LOCAL_OUTPUT_DIR/
-          cp $FIRMWARE_DIR/*.factory.img $LOCAL_OUTPUT_DIR/ 2>/dev/null
-          cp ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/.config $LOCAL_OUTPUT_DIR/final_config.config
-          cp ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/build.log $LOCAL_OUTPUT_DIR/build_log.txt
+          cp $FIRMWARE_DIR/*.sysupgrade.bin $LOCAL_OUTPUT/
+          cp $FIRMWARE_DIR/*.factory.img $LOCAL_OUTPUT/ 2>/dev/null
+          cp ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/.config $LOCAL_OUTPUT/final_config.config
+          cp ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/build.log $LOCAL_OUTPUT/build_log.txt
 
-          # 同步到GitHub产物目录（用于上传）
-          cp -r $LOCAL_OUTPUT_DIR/* $GITHUB_OUTPUT_DIR/
+          # 同步到远程输出目录
+          cp -r $LOCAL_OUTPUT/* $REMOTE_OUTPUT/
 
-          # 显示产物列表
-          echo "===== 本地产物目录：$LOCAL_OUTPUT_DIR ====="
-          ls -l $LOCAL_OUTPUT_DIR
+          echo "本地产物路径：$LOCAL_OUTPUT"
+          ls -l $LOCAL_OUTPUT
 
-      - name: 9. 上传产物到GitHub（备份+远程取用）
+      - name: 9. 上传产物到GitHub
         uses: actions/upload-artifact@v4
         with:
-          name: istoreos-local-xgp-firmware
+          name: istoreos-local-final
           path: ${{ env.LOCAL_BUILD_DIR }}/output/
-          retention-days: 30  # 保留30天，方便后续下载
+          retention-days: 30
