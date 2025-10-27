@@ -1,0 +1,808 @@
+name: 编译 xgp 设备 iStoreOS 固件（带 QModem5G）
+
+# 触发条件：手动触发 + 推送特定分支（可根据需求修改分支名）
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "xgp-build" ]
+    paths:
+      - '.github/workflows/build-istoreos-xgp-qmodem.yml'
+      - 'configs/xgp-istoreos-qmodem.config' # 若 Config 单独存放，需对应路径
+
+jobs:
+  build-firmware:
+    runs-on: ubuntu-latest
+    env:
+      # 核心配置：源码仓库、分支、目标设备
+      ISTOREOS_REPO: "https://github.com/istoreos/istoreos.git"
+      ISTOREOS_BRANCH: "main" # iStoreOS 主分支（rk35xx 设备通用）
+      TARGET_DEVICE: "rockchip_rk35xx_DEVICE_nlnet_xgp"
+      # 日志控制：避免过大中断
+      BUILD_LOG_FILE: "build.log"
+      MAX_LOG_LINES: 100000 # 限制日志最大行数
+
+    steps:
+      - name: 1. 检查工作区
+        uses: actions/checkout@v4
+
+      - name: 2. 安装编译依赖（OpenWRT/iStoreOS 必备）
+        run: |
+          sudo apt update -y
+          sudo apt install -y \
+            build-essential subversion libncurses5-dev zlib1g-dev gawk \
+            gcc-multilib flex git gettext wget unzip python3 python3-distutils \
+            python3-setuptools python3-pip libssl-dev libelf-dev ecj fastjar \
+            java-propose-classpath rsync time screen curl libxml2-utils xsltproc \
+            libc6-dev-i386 lib32gcc-s1 lib32stdc++6 # 32位兼容库（防止编译报错）
+
+      - name: 3. 下载 iStoreOS 源码
+        run: |
+          git clone --depth 1 -b $ISTOREOS_BRANCH $ISTOREOS_REPO istoreos-src
+          cd istoreos-src
+          # 初始化编译环境
+          ./scripts/feeds update -a --noupdate
+          echo "源码下载完成，目录：$(pwd)"
+
+      - name: 4. 添加 QModem5G Feed 源（集成到编译环境）
+        run: |
+          cd istoreos-src
+          # 写入 QModem 源到 feeds 配置（参考 QModem 官方文档）
+          echo 'src-git qmodem https://github.com/FUjr/QModem.git' >> feeds.conf.default
+          # 更新并安装所有 feeds（含 QModem 包）
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          # 确认 QModem 包已存在
+          if [ ! -d "package/feeds/qmodem/luci-app-qmodem" ]; then
+            echo "错误：QModem 包未成功安装，请检查 Feed 源"
+            exit 1
+          fi
+          echo "QModem Feed 源添加完成"
+
+      - name: 5. 导入 xgp 设备 Config 文件（含 QModem 配置）
+        run: |
+          cd istoreos-src
+          # 写入完整 Config（基于用户提供的配置，补充 QModem 必要项）
+          cat > .config << 'EOF'
+# 1. 目标平台配置（xgp 设备：RK3568 属于 rockchip rk35xx 系列）
+CONFIG_TARGET_rockchip=y
+CONFIG_TARGET_rockchip_armv8=y
+CONFIG_TARGET_MULTI_PROFILE=y
+CONFIG_TARGET_ALL_PROFILES=y
+CONFIG_TARGET_DEVICE_rockchip_rk35xx_DEVICE_nlnet_xgp=y
+
+# 2. 核心功能开关（保留原配置，补充 QModem 依赖）
+CONFIG_ALL_KMODS=y
+CONFIG_DEVEL=y
+CONFIG_BUSYBOX_CUSTOM=y
+CONFIG_BUILD_PATENTED=y
+CONFIG_CCACHE=y
+CONFIG_DOCKER_NET_ENCRYPT=y
+CONFIG_DOCKER_NET_MACVLAN=y
+CONFIG_DOCKER_NET_OVERLAY=y
+CONFIG_DOCKER_NET_TFTP=y
+CONFIG_DOCKER_OPTIONAL_FEATURES=y
+CONFIG_DOCKER_STO_BTRFS=y
+CONFIG_DOCKER_STO_EXT4=y
+CONFIG_DWARVES=y
+CONFIG_GNUTLS_ALPN=y
+CONFIG_GNUTLS_ANON=y
+CONFIG_GNUTLS_DTLS_SRTP=y
+CONFIG_GNUTLS_HEARTBEAT=y
+CONFIG_GNUTLS_OCSP=y
+CONFIG_GNUTLS_PSK=y
+CONFIG_HTOP_LMSENSORS=y
+# CONFIG_IB is not set
+CONFIG_IB_STANDALONE=y
+CONFIG_IMAGEOPT=y
+CONFIG_KERNEL_ARM_PMU=y
+CONFIG_KERNEL_ARM_PMUV3=y
+CONFIG_KERNEL_BPF_EVENTS=y
+CONFIG_KERNEL_CFQ_GROUP_IOSCHED=y
+CONFIG_KERNEL_CGROUP_DEVICE=y
+CONFIG_KERNEL_CGROUP_FREEZER=y
+CONFIG_KERNEL_CGROUP_HUGETLB=y
+CONFIG_KERNEL_CGROUP_NET_PRIO=y
+CONFIG_KERNEL_CGROUP_PERF=y
+CONFIG_KERNEL_DEBUG_INFO_BTF=y
+CONFIG_KERNEL_DEBUG_INFO_BTF_MODULES=y
+# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set
+CONFIG_KERNEL_FTRACE=y
+CONFIG_KERNEL_HUGETLBFS=y
+CONFIG_KERNEL_HUGETLB_PAGE=y
+CONFIG_KERNEL_KPROBES=y
+CONFIG_KERNEL_KPROBE_EVENTS=y
+CONFIG_KERNEL_MEMCG_SWAP_ENABLED=y
+CONFIG_KERNEL_MODULE_ALLOW_BTF_MISMATCH=y
+CONFIG_KERNEL_NET_CLS_CGROUP=y
+CONFIG_KERNEL_PERF_EVENTS=y
+CONFIG_KERNEL_TRANSPARENT_HUGEPAGE=y
+CONFIG_KERNEL_TRANSPARENT_HUGEPAGE_ALWAYS=y
+CONFIG_KERNEL_XDP_SOCKETS=y
+# CONFIG_LIBCURL_MBEDTLS is not set
+CONFIG_LIBCURL_OPENSSL=y
+CONFIG_LIBCURL_VERBOSE=y
+CONFIG_LIBCURL_ZLIB=y
+CONFIG_LIBCURL_ZSTD=y
+CONFIG_LIBQMI_COLLECTION_BASIC=y # QModem 依赖：libqmi 基础支持
+CONFIG_LIBQMI_WITH_MBIM_QMUX=y # QModem 依赖：MBIM 多路复用
+CONFIG_LIBQMI_WITH_QRTR_GLIB=y # QModem 依赖：QRTR 通信
+CONFIG_MODEMMANAGER_WITH_MBIM=y # QModem 依赖：ModemManager MBIM 支持
+CONFIG_MODEMMANAGER_WITH_QMI=y # QModem 依赖：ModemManager QMI 支持
+CONFIG_MODEMMANAGER_WITH_QRTR=y # QModem 依赖：ModemManager QRTR 支持
+CONFIG_NEED_BPF_TOOLCHAIN=y
+CONFIG_NFS_KERNEL_SERVER_V4=y
+CONFIG_OPENSSL_ENGINE=y
+CONFIG_OPENSSL_OPTIMIZE_SPEED=y
+CONFIG_OPENSSL_WITH_ASM=y
+CONFIG_OPENSSL_WITH_CHACHA_POLY1305=y
+CONFIG_OPENSSL_WITH_CMS=y
+CONFIG_OPENSSL_WITH_DEPRECATED=y
+CONFIG_OPENSSL_WITH_ERROR_MESSAGES=y
+CONFIG_OPENSSL_WITH_IDEA=y
+CONFIG_OPENSSL_WITH_MDC2=y
+CONFIG_OPENSSL_WITH_PSK=y
+CONFIG_OPENSSL_WITH_SEED=y
+CONFIG_OPENSSL_WITH_SRP=y
+CONFIG_OPENSSL_WITH_TLS13=y
+CONFIG_OPENSSL_WITH_WHIRLPOOL=y
+CONFIG_PARTED_READLINE=y
+CONFIG_PERL_NOCOMMENT=y
+CONFIG_PERL_THREADS=y
+CONFIG_REPRODUCIBLE_DEBUG_INFO=y
+CONFIG_RPCBIND_LIBWRAP=y
+CONFIG_RPCBIND_RMTCALLS=y
+CONFIG_SAMBA4_SERVER_AVAHI=y
+CONFIG_SAMBA4_SERVER_NETBIOS=y
+CONFIG_SAMBA4_SERVER_VFS=y
+CONFIG_SAMBA4_SERVER_WSDD2=y
+CONFIG_TARGET_KERNEL_PARTSIZE=64
+# CONFIG_TARGET_ROOTFS_EXT4FS is not set
+CONFIG_TARGET_ROOTFS_PARTSIZE=256
+CONFIG_UNETD_VXLAN_SUPPORT=y
+CONFIG_USE_LLVM_BUILD=y
+CONFIG_VERSIONOPT=y
+CONFIG_VERSION_BUG_URL=""
+CONFIG_VERSION_CODE=""
+CONFIG_VERSION_DIST="iStoreOS"
+CONFIG_VERSION_HOME_URL=""
+CONFIG_VERSION_HWREV=""
+CONFIG_VERSION_MANUFACTURER=""
+CONFIG_VERSION_MANUFACTURER_URL=""
+CONFIG_VERSION_NUMBER=""
+CONFIG_VERSION_REPO="https://mirrors.cernet.edu.cn/openwrt/releases/%V"
+CONFIG_VERSION_SUPPORT_URL=""
+CONFIG_shadow-all=y
+# CONFIG_VERSION_CODE_FILENAMES is not set
+# CONFIG_VERSION_FILENAMES is not set
+# CONFIG_PACKAGE_trusted-firmware-a-rk3308-rock-pi-s is not set
+# CONFIG_PACKAGE_trusted-firmware-a-rk3568-e25 is not set
+# CONFIG_LIBMBEDTLS_DEBUG_C is not set
+# CONFIG_LIBMBEDTLS_HKDF_C is not set
+
+# 3. 核心软件包（保留原配置，新增 QModem 包）
+CONFIG_PACKAGE_adb=y
+CONFIG_PACKAGE_adb-enablemodem=y
+CONFIG_PACKAGE_appfilter=y
+CONFIG_PACKAGE_avahi-dbus-daemon=y
+CONFIG_PACKAGE_avahi-utils=y
+CONFIG_PACKAGE_bash=y
+CONFIG_PACKAGE_ca-certificates=y
+CONFIG_PACKAGE_cifsmount=y
+CONFIG_PACKAGE_containerd=y
+CONFIG_PACKAGE_coreutils-stat=y
+CONFIG_PACKAGE_davfs2=y
+CONFIG_PACKAGE_dbus=y
+CONFIG_PACKAGE_ddns-scripts=y
+CONFIG_PACKAGE_ddns-scripts-cloudflare=y
+CONFIG_PACKAGE_ddns-scripts-dnspod=y
+CONFIG_PACKAGE_ddns-scripts-services=y
+CONFIG_PACKAGE_ddns-scripts_aliyun=y
+CONFIG_PACKAGE_ddnsto=y
+CONFIG_PACKAGE_dkml=y
+# CONFIG_PACKAGE_dnsmasq is not set
+CONFIG_PACKAGE_dnsmasq-full=y
+CONFIG_PACKAGE_dnsmasq_full_auth=y
+CONFIG_PACKAGE_dnsmasq_full_conntrack=y
+CONFIG_PACKAGE_dnsmasq_full_dhcp=y
+CONFIG_PACKAGE_dnsmasq_full_dhcpv6=y
+CONFIG_PACKAGE_dnsmasq_full_dnssec=y
+CONFIG_PACKAGE_dnsmasq_full_ipset=y
+CONFIG_PACKAGE_dnsmasq_full_nftset=y
+CONFIG_PACKAGE_dnsmasq_full_noid=y
+CONFIG_PACKAGE_dnsmasq_full_tftp=y
+CONFIG_PACKAGE_docker=y
+CONFIG_PACKAGE_docker-compose=y
+CONFIG_PACKAGE_dockerd=y
+CONFIG_PACKAGE_dtc=y
+CONFIG_PACKAGE_etherwake=y
+CONFIG_PACKAGE_external-protocol=y
+CONFIG_PACKAGE_fdisk=y
+CONFIG_PACKAGE_glib2=y
+CONFIG_PACKAGE_gre=y
+CONFIG_PACKAGE_hostapd-openssl=y
+CONFIG_PACKAGE_htop=y
+CONFIG_PACKAGE_ip-full=y
+CONFIG_PACKAGE_ip6tables-nft=y
+CONFIG_PACKAGE_iperf3=y
+CONFIG_PACKAGE_ipset=y
+CONFIG_PACKAGE_iptables-mod-extra=y
+CONFIG_PACKAGE_iptables-nft=y
+CONFIG_PACKAGE_istoreos-intl=m
+CONFIG_PACKAGE_libatomic=y
+CONFIG_PACKAGE_libavahi-client=y
+CONFIG_PACKAGE_libavahi-dbus-support=y
+CONFIG_PACKAGE_libbpf=y
+CONFIG_PACKAGE_libcap=y
+CONFIG_PACKAGE_libcap-ng=y
+CONFIG_PACKAGE_libdaemon=y
+CONFIG_PACKAGE_libdbus=y
+CONFIG_PACKAGE_libdevmapper=y
+CONFIG_PACKAGE_libelf=y
+CONFIG_PACKAGE_libevdev=y
+CONFIG_PACKAGE_libexpat=y
+CONFIG_PACKAGE_libfdisk=y
+CONFIG_PACKAGE_libffi=y
+CONFIG_PACKAGE_libfuse=y
+CONFIG_PACKAGE_libgcrypt=y
+CONFIG_PACKAGE_libgdbm=y
+CONFIG_PACKAGE_libgmp=y
+CONFIG_PACKAGE_libgnutls=y
+CONFIG_PACKAGE_libgpg-error=y
+CONFIG_PACKAGE_libimobiledevice=y
+CONFIG_PACKAGE_libimobiledevice-glue=y
+CONFIG_PACKAGE_libiperf3=y
+CONFIG_PACKAGE_libipset=y
+CONFIG_PACKAGE_libiptext=y
+CONFIG_PACKAGE_libiptext-nft=y
+CONFIG_PACKAGE_libiptext6=y
+CONFIG_PACKAGE_libkeyutils=y
+CONFIG_PACKAGE_libkmod=y
+CONFIG_PACKAGE_liblzo=y
+CONFIG_PACKAGE_libmbim=y # QModem 依赖：MBIM 库
+CONFIG_PACKAGE_libnatpmp=y
+CONFIG_PACKAGE_libncurses=y
+CONFIG_PACKAGE_libneon=y
+CONFIG_PACKAGE_libnetfilter-conntrack=y
+CONFIG_PACKAGE_libnettle=y
+CONFIG_PACKAGE_libnfnetlink=y
+CONFIG_PACKAGE_libopenssl=y
+CONFIG_PACKAGE_libopenssl-conf=y
+CONFIG_PACKAGE_libopenssl-legacy=y
+CONFIG_PACKAGE_libparted=y
+CONFIG_PACKAGE_libpcap=y
+CONFIG_PACKAGE_libpci=y
+CONFIG_PACKAGE_libpcre2=y
+CONFIG_PACKAGE_libplist=y
+CONFIG_PACKAGE_libpopt=y
+CONFIG_PACKAGE_libqmi=y # QModem 依赖：QMI 库
+CONFIG_PACKAGE_libqrtr-glib=y # QModem 依赖：QRTR GLib 库
+CONFIG_PACKAGE_libreadline=y
+CONFIG_PACKAGE_libseccomp=y
+CONFIG_PACKAGE_libstdcpp=y
+CONFIG_PACKAGE_libsysfs=y
+CONFIG_PACKAGE_libtasn1=y
+CONFIG_PACKAGE_libtirpc=y
+CONFIG_PACKAGE_libudev-zero=y
+CONFIG_PACKAGE_liburing=y
+CONFIG_PACKAGE_libusb-1.0=y
+CONFIG_PACKAGE_libusbmuxd=y
+# CONFIG_PACKAGE_libustream-mbedtls is not set
+CONFIG_PACKAGE_libustream-openssl=y
+CONFIG_PACKAGE_libuv=y
+CONFIG_PACKAGE_libwebsockets-full=y
+CONFIG_PACKAGE_libwrap=y
+CONFIG_PACKAGE_libxml2=y
+CONFIG_PACKAGE_libxtables=y
+CONFIG_PACKAGE_linkease=y
+CONFIG_PACKAGE_linkmount=y
+CONFIG_PACKAGE_losetup=y
+CONFIG_PACKAGE_lrzsz=y
+CONFIG_PACKAGE_lsblk=y
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-app-argon-config=y
+CONFIG_PACKAGE_luci-app-cifs-mount=y
+CONFIG_PACKAGE_luci-app-cpufreq=y
+CONFIG_PACKAGE_luci-app-ddns=y
+CONFIG_PACKAGE_luci-app-ddnsto=y
+CONFIG_PACKAGE_luci-app-diskman=y
+CONFIG_PACKAGE_luci-app-diskman_INCLUDE_btrfs_progs=y
+CONFIG_PACKAGE_luci-app-diskman_INCLUDE_lsblk=y
+CONFIG_PACKAGE_luci-app-dockerman=y
+CONFIG_PACKAGE_luci-app-fan=y
+CONFIG_PACKAGE_luci-app-filetransfer=y
+CONFIG_PACKAGE_luci-app-firewall=y
+CONFIG_PACKAGE_luci-app-istorex=m
+CONFIG_PACKAGE_luci-app-linkease=y
+CONFIG_PACKAGE_luci-app-nfs=y
+CONFIG_PACKAGE_luci-app-oaf=y
+CONFIG_PACKAGE_luci-app-oled=y
+CONFIG_PACKAGE_luci-app-ota=y
+CONFIG_PACKAGE_luci-app-package-manager=y
+CONFIG_PACKAGE_luci-app-quickstart=y
+CONFIG_PACKAGE_luci-app-qmodem=y # 核心：QModem5G 管理界面
+CONFIG_PACKAGE_luci-app-samba4=y
+CONFIG_PACKAGE_luci-app-ttyd=y
+CONFIG_PACKAGE_luci-app-unishare=y
+CONFIG_PACKAGE_luci-app-upnp=y
+CONFIG_PACKAGE_luci-app-wol=y
+CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-cifs-mount-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-cpufreq-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-ddns-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-ddnsto-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-diskman-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-dockerman-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-fan-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-filetransfer-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-linkease-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-nfs-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-oaf-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-oled-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-ota-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-quickstart-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-qmodem-zh-cn=y # QModem 中文语言包
+CONFIG_PACKAGE_luci-i18n-samba4-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-unishare-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-upnp-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-wol-zh-cn=y
+CONFIG_PACKAGE_luci-lib-docker=y
+CONFIG_PACKAGE_luci-lib-fs=y
+CONFIG_PACKAGE_luci-lib-mac-vendor=y
+CONFIG_PACKAGE_luci-light=y
+CONFIG_PACKAGE_luci-mod-admin-full=y
+CONFIG_PACKAGE_luci-mod-network=y
+CONFIG_PACKAGE_luci-mod-status=y
+CONFIG_PACKAGE_luci-mod-system=y
+CONFIG_PACKAGE_luci-proto-3g=y
+CONFIG_PACKAGE_luci-proto-external=y
+CONFIG_PACKAGE_luci-proto-gre=y
+CONFIG_PACKAGE_luci-proto-ipv6=y
+CONFIG_PACKAGE_luci-proto-mbim=y # QModem 依赖：MBIM 协议支持
+CONFIG_PACKAGE_luci-proto-modemmanager=y # QModem 依赖：ModemManager 协议
+CONFIG_PACKAGE_luci-proto-ncm=y
+CONFIG_PACKAGE_luci-proto-ppp=y
+CONFIG_PACKAGE_luci-proto-qmi=y # QModem 依赖：QMI 协议支持
+CONFIG_PACKAGE_luci-proto-relay=y
+CONFIG_PACKAGE_luci-proto-unet=y
+CONFIG_PACKAGE_luci-ssl-openssl=y
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+CONFIG_PACKAGE_mdadm=y
+CONFIG_PACKAGE_miniupnpd-nftables=y
+CONFIG_PACKAGE_modemmanager=y # QModem 核心依赖：Modem 管理服务
+CONFIG_PACKAGE_nfs-kernel-server=y
+CONFIG_PACKAGE_nfs-kernel-server-utils=y
+CONFIG_PACKAGE_nfs-utils=y
+CONFIG_PACKAGE_nfs-utils-libs=y
+CONFIG_PACKAGE_ntfs3-mount=y
+CONFIG_PACKAGE_ntfsprogs=y
+CONFIG_PACKAGE_openssh-sftp-server=y
+CONFIG_PACKAGE_openssl-util=y
+CONFIG_PACKAGE_parted=y
+CONFIG_PACKAGE_pciids=y
+CONFIG_PACKAGE_pciutils=y
+CONFIG_PACKAGE_perl=y
+CONFIG_PACKAGE_perlbase-base=y
+CONFIG_PACKAGE_perlbase-bytes=y
+CONFIG_PACKAGE_perlbase-class=y
+CONFIG_PACKAGE_perlbase-config=y
+CONFIG_PACKAGE_perlbase-cwd=y
+CONFIG_PACKAGE_perlbase-errno=y
+CONFIG_PACKAGE_perlbase-essential=y
+CONFIG_PACKAGE_perlbase-fcntl=y
+CONFIG_PACKAGE_perlbase-file=y
+CONFIG_PACKAGE_perlbase-filehandle=y
+CONFIG_PACKAGE_perlbase-i18n=y
+CONFIG_PACKAGE_perlbase-integer=y
+CONFIG_PACKAGE_perlbase-io=y
+CONFIG_PACKAGE_perlbase-list=y
+CONFIG_PACKAGE_perlbase-locale=y
+CONFIG_PACKAGE_perlbase-params=y
+CONFIG_PACKAGE_perlbase-posix=y
+CONFIG_PACKAGE_perlbase-re=y
+CONFIG_PACKAGE_perlbase-scalar=y
+CONFIG_PACKAGE_perlbase-selectsaver=y
+CONFIG_PACKAGE_perlbase-socket=y
+CONFIG_PACKAGE_perlbase-symbol=y
+CONFIG_PACKAGE_perlbase-tie=y
+CONFIG_PACKAGE_perlbase-unicore=y
+CONFIG_PACKAGE_perlbase-utf8=y
+CONFIG_PACKAGE_perlbase-xsloader=y
+CONFIG_PACKAGE_procps-ng=y
+CONFIG_PACKAGE_procps-ng-vmstat=y
+CONFIG_PACKAGE_proto-bonding=m
+CONFIG_PACKAGE_qmi-utils=y # QModem 依赖：QMI 工具集
+CONFIG_PACKAGE_quickstart=y
+CONFIG_PACKAGE_relayd=y
+CONFIG_PACKAGE_resolveip=y
+CONFIG_PACKAGE_rpcbind=y
+CONFIG_PACKAGE_rpcd-mod-iwinfo=y
+CONFIG_PACKAGE_rpcd-mod-rrdns=y
+CONFIG_PACKAGE_runc=y
+CONFIG_PACKAGE_samba4-libs=y
+CONFIG_PACKAGE_samba4-server=y
+CONFIG_PACKAGE_shadow=y
+CONFIG_PACKAGE_shadow-chage=y
+CONFIG_PACKAGE_shadow-chfn=y
+CONFIG_PACKAGE_shadow-chgpasswd=y
+CONFIG_PACKAGE_shadow-chpasswd=y
+CONFIG_PACKAGE_shadow-chsh=y
+CONFIG_PACKAGE_shadow-common=y
+CONFIG_PACKAGE_shadow-expiry=y
+CONFIG_PACKAGE_shadow-faillog=y
+CONFIG_PACKAGE_shadow-gpasswd=y
+CONFIG_PACKAGE_shadow-groupadd=y
+CONFIG_PACKAGE_shadow-groupdel=y
+CONFIG_PACKAGE_shadow-groupmems=y
+CONFIG_PACKAGE_shadow-groupmod=y
+CONFIG_PACKAGE_shadow-groups=y
+CONFIG_PACKAGE_shadow-grpck=y
+CONFIG_PACKAGE_shadow-grpconv=y
+CONFIG_PACKAGE_shadow-grpunconv=y
+CONFIG_PACKAGE_shadow-lastlog=y
+CONFIG_PACKAGE_shadow-login=y
+CONFIG_PACKAGE_shadow-logoutd=y
+CONFIG_PACKAGE_shadow-newgidmap=y
+CONFIG_PACKAGE_shadow-newgrp=y
+CONFIG_PACKAGE_shadow-newuidmap=y
+CONFIG_PACKAGE_shadow-newusers=y
+CONFIG_PACKAGE_shadow-nologin=y
+CONFIG_PACKAGE_shadow-passwd=y
+CONFIG_PACKAGE_shadow-pwck=y
+CONFIG_PACKAGE_shadow-pwconv=y
+CONFIG_PACKAGE_shadow-pwunconv=y
+CONFIG_PACKAGE_shadow-su=y
+CONFIG_PACKAGE_shadow-useradd=y
+CONFIG_PACKAGE_shadow-userdel=y
+CONFIG_PACKAGE_shadow-usermod=y
+CONFIG_PACKAGE_shadow-utils=y
+CONFIG_PACKAGE_shadow-vipw=y
+CONFIG_PACKAGE_smartd=y
+CONFIG_PACKAGE_smartmontools=y
+CONFIG_PACKAGE_strace=y
+CONFIG_PACKAGE_swap-utils=y
+CONFIG_PACKAGE_swconfig=y
+CONFIG_PACKAGE_sysfsutils=y
+CONFIG_PACKAGE_sysstat=y
+CONFIG_PACKAGE_tcpdump=y
+CONFIG_PACKAGE_terminfo=y
+CONFIG_PACKAGE_tini=y
+CONFIG_PACKAGE_ttyd=y
+CONFIG_PACKAGE_uhttpd=y
+CONFIG_PACKAGE_uhttpd-mod-ubus=y
+CONFIG_PACKAGE_umbim=y # QModem 依赖：MBIM 工具
+CONFIG_PACKAGE_unet-cli=y
+CONFIG_PACKAGE_unetd=y
+CONFIG_PACKAGE_unishare=y
+CONFIG_PACKAGE_unzip=y
+CONFIG_PACKAGE_uqmi=y # QModem 依赖：QMI 工具
+CONFIG_PACKAGE_usb-modeswitch=y # QModem 依赖：USB Modem 模式切换
+CONFIG_PACKAGE_usbids=y
+CONFIG_PACKAGE_usbmuxd=y
+CONFIG_PACKAGE_usbutils=y
+CONFIG_PACKAGE_webdav2=y
+CONFIG_PACKAGE_wget-ssl=y
+CONFIG_PACKAGE_wpa-cli=y
+CONFIG_PACKAGE_wpa-supplicant-openssl=y
+CONFIG_PACKAGE_wpad-basic-mbedtls=m
+CONFIG_PACKAGE_wsdd2=y
+CONFIG_PACKAGE_wwan=y # QModem 依赖：WWAN 核心支持
+CONFIG_PACKAGE_xtables-nft=y
+CONFIG_PACKAGE_zlib=y
+CONFIG_PACKAGE_zram-swap=y
+
+# 4. 硬件驱动（严格匹配 xgp 设备硬件）
+## 4.1 WiFi 驱动（MINIPCIE 接口，支持 MT7916/MT7922）
+CONFIG_DRIVER_11AC_SUPPORT=y
+CONFIG_DRIVER_11AX_SUPPORT=y
+CONFIG_DRIVER_11N_SUPPORT=y
+CONFIG_PACKAGE_MAC80211_DEBUGFS=y
+CONFIG_PACKAGE_MAC80211_MESH=y
+CONFIG_PACKAGE_kmod-mt7915-firmware=y
+CONFIG_PACKAGE_kmod-mt7915e=y
+CONFIG_PACKAGE_kmod-mt7916-firmware=y
+CONFIG_PACKAGE_kmod-mt7922-firmware=y
+CONFIG_PACKAGE_kmod-mt7922-common=y
+CONFIG_PACKAGE_wireless-regdb=y
+
+## 4.2 网口驱动（2个 RTL8211F 千兆网口）
+CONFIG_PACKAGE_kmod-phy-realtek=y # RTL8211F 核心驱动
+CONFIG_PACKAGE_kmod-mii=y # MII 总线依赖
+CONFIG_PACKAGE_kmod-net-selftests=y
+
+## 4.3 存储驱动（32GB eMMC + TF 卡）
+CONFIG_PACKAGE_kmod-ata-core=y
+CONFIG_PACKAGE_kmod-mmc=y # eMMC/TF 卡驱动
+CONFIG_PACKAGE_kmod-loop=y
+CONFIG_PACKAGE_kmod-zram=y
+
+## 4.4 USB 驱动（USBA3 OTG 接口）
+CONFIG_PACKAGE_kmod-usb3=y # USB3.0 核心
+CONFIG_PACKAGE_kmod-usb-xhci-hcd=y # USB3.0 XHCI 控制器
+CONFIG_PACKAGE_kmod-usb-otg=y # OTG 功能
+CONFIG_PACKAGE_kmod-usb2=y # USB2.0 兼容
+CONFIG_PACKAGE_kmod-usb2-pci=y
+CONFIG_PACKAGE_kmod-usb-storage=y # USB 存储支持
+CONFIG_PACKAGE_kmod-usb-storage-uas=y
+
+## 4.5 HDMI 驱动（HDMI2.0 输出）
+CONFIG_PACKAGE_libdrm=y
+CONFIG_PACKAGE_mali-csf-firmware=y # Mali-G52 GPU 固件
+CONFIG_PACKAGE_rkmpp=y # RK 媒体处理
+CONFIG_PACKAGE_rkrga=y # RK RGA 加速
+CONFIG_PACKAGE_kmod-dma-buf=y
+CONFIG_PACKAGE_kmod-drm=y
+CONFIG_PACKAGE_kmod-drm-kms-helper=y
+CONFIG_PACKAGE_kmod-drm-rockchip-rk35xx=y # RK3568 DRM 驱动
+CONFIG_PACKAGE_kmod-drm-rockchip-rk35xx-hdmitx=y # HDMI2.0 输出
+CONFIG_PACKAGE_kmod-drm-shmem-helper=y
+CONFIG_PACKAGE_kmod-fb=y
+CONFIG_PACKAGE_kmod-fb-cfb-copyarea=y
+CONFIG_PACKAGE_kmod-fb-cfb-fillrect=y
+CONFIG_PACKAGE_kmod-fb-cfb-imgblt=y
+CONFIG_PACKAGE_kmod-fb-sys-fops=y
+CONFIG_PACKAGE_kmod-fb-sys-ram=y
+
+## 4.6 5G 模块驱动（SIM 卡槽 + M.2 B Key，支持 RM500Q）
+CONFIG_PACKAGE_kmod-qrtr=y # QRTR 协议（RM500Q 必备）
+CONFIG_PACKAGE_kmod-qrtr-mhi=y # MHI-QRTR 桥接
+CONFIG_PACKAGE_kmod-qrtr-tun=y # QRTR 隧道
+CONFIG_PACKAGE_kmod-mhi-bus=y # MHI 总线（RM500Q 核心依赖）
+CONFIG_PACKAGE_kmod-mhi-net=y # MHI 网络
+CONFIG_PACKAGE_kmod-mhi-pci-generic=y # MHI PCI 支持
+CONFIG_PACKAGE_kmod-mhi-wwan-ctrl=y # MHI WWAN 控制
+CONFIG_PACKAGE_kmod-mhi-wwan-mbim=y # MHI MBIM 协议
+CONFIG_PACKAGE_kmod-wwan=y # WWAN 核心
+
+## 4.7 PCIe 驱动（MINIPCIE + M.2 E Key）
+CONFIG_PACKAGE_kmod-pcie=y # PCIe 核心
+CONFIG_PACKAGE_kmod-pcie-rockchip=y # RK3568 PCIe 驱动
+
+## 4.8 FPC 显示屏驱动（SPI/I2C 接口，GC9307 芯片）
+CONFIG_PACKAGE_kmod-spi-core=y # SPI 总线核心
+CONFIG_PACKAGE_kmod-i2c-core=y # I2C 总线核心
+CONFIG_PACKAGE_kmod-i2c-algo-bit=y # I2C 位算法
+CONFIG_PACKAGE_kmod-fb-gc9307=y # GC9307 专用驱动
+CONFIG_PACKAGE_kmod-fb-spi=y # SPI 帧缓冲
+CONFIG_PACKAGE_kmod-drm-spi=y # DRM SPI 显示支持
+
+## 4.9 PWM 风扇驱动（5V MX1.25 4pin，温控调速）
+CONFIG_PACKAGE_kmod-pwm=y # PWM 核心
+CONFIG_PACKAGE_kmod-pwm-rockchip=y # RK3568 PWM 控制器
+CONFIG_PACKAGE_kmod-hwmon=y # 硬件监控（读 CPU 温度）
+CONFIG_PACKAGE_kmod-hwmon-core=y
+CONFIG_PACKAGE_kmod-hwmon-rockchip=y # RK3568 温度传感器
+CONFIG_PACKAGE_kmod-fan=y # 风扇控制核心
+CONFIG_PACKAGE_kmod-fan-pwm=y # PWM 调速驱动
+
+## 4.10 LED 与按钮驱动（3个 LED + 3个按钮）
+CONFIG_PACKAGE_kmod-leds-gpio=y # GPIO LED 驱动
+CONFIG_PACKAGE_kmod-ledtrig-default-on=y # LED 常亮触发
+CONFIG_PACKAGE_kmod-ledtrig-heartbeat=y # 系统心跳触发
+CONFIG_PACKAGE_kmod-ledtrig-netdev=y # 网络活动触发
+CONFIG_PACKAGE_kmod-gpio-button-hotplug=y # 按钮热插拔检测
+CONFIG_PACKAGE_kmod-input-gpio-keys=y # GPIO 按键输入
+CONFIG_PACKAGE_kmod-reboot-mode=y # 重启模式（刷机/恢复键）
+
+## 4.11 其他核心驱动
+CONFIG_PACKAGE_kmod-cfg80211=y # 无线核心
+CONFIG_PACKAGE_kmod-lib80211=y # 802.11 核心
+CONFIG_PACKAGE_kmod-mac80211=y # MAC80211 核心
+CONFIG_PACKAGE_kmod-of-mdio=y # MDIO 设备树支持
+CONFIG_PACKAGE_kmod-oid-registry=y # OID 注册
+CONFIG_PACKAGE_kmod-phylink=y # PHY 链接管理
+CONFIG_PACKAGE_kmod-tun=y # TUN 设备
+CONFIG_PACKAGE_kmod-vxlan=y # VXLAN 支持
+CONFIG_PACKAGE_kmod-wireguard=y # WireGuard 支持
+CONFIG_PACKAGE_kmod-xdp-sockets-diag=y # XDP 诊断
+
+# 5. 加密/系统核心驱动（保留必要功能）
+CONFIG_PACKAGE_libmbedtls=y
+CONFIG_PACKAGE_kmod-asn1-decoder=y
+CONFIG_PACKAGE_kmod-backlight=y
+CONFIG_PACKAGE_kmod-backlight-gpio=y
+CONFIG_PACKAGE_kmod-bonding=y
+CONFIG_PACKAGE_kmod-br-netfilter=y
+CONFIG_PACKAGE_kmod-button-hotplug=y
+CONFIG_PACKAGE_kmod-crypto-acompress=y
+CONFIG_PACKAGE_kmod-crypto-aead=y
+CONFIG_PACKAGE_kmod-crypto-arc4=y
+CONFIG_PACKAGE_kmod-crypto-authenc=y
+CONFIG_PACKAGE_kmod-crypto-blake2b=y
+CONFIG_PACKAGE_kmod-crypto-cbc=y
+CONFIG_PACKAGE_kmod-crypto-ccm=y
+CONFIG_PACKAGE_kmod-crypto-cmac=y
+CONFIG_PACKAGE_kmod-crypto-crc32=y
+CONFIG_PACKAGE_kmod-crypto-ctr=y
+CONFIG_PACKAGE_kmod-crypto-cts=y
+CONFIG_PACKAGE_kmod-crypto-deflate=y
+CONFIG_PACKAGE_kmod-crypto-des=y
+CONFIG_PACKAGE_kmod-crypto-ecb=y
+CONFIG_PACKAGE_kmod-crypto-echainiv=y
+CONFIG_PACKAGE_kmod-crypto-gcm=y
+CONFIG_PACKAGE_kmod-crypto-gf128=y
+CONFIG_PACKAGE_kmod-crypto-ghash=y
+CONFIG_PACKAGE_kmod-crypto-hmac=y
+CONFIG_PACKAGE_kmod-crypto-kpp=y
+CONFIG_PACKAGE_kmod-crypto-lib-chacha20=y
+CONFIG_PACKAGE_kmod-crypto-lib-chacha20poly1305=y
+CONFIG_PACKAGE_kmod-crypto-lib-curve25519=y
+CONFIG_PACKAGE_kmod-crypto-lib-poly1305=y
+CONFIG_PACKAGE_kmod-crypto-manager=y
+CONFIG_PACKAGE_kmod-crypto-md4=y
+CONFIG_PACKAGE_kmod-crypto-md5=y
+CONFIG_PACKAGE_kmod-crypto-null=y
+CONFIG_PACKAGE_kmod-crypto-rng=y
+CONFIG_PACKAGE_kmod-crypto-seqiv=y
+CONFIG_PACKAGE_kmod-crypto-sha1=y
+CONFIG_PACKAGE_kmod-crypto-sha256=y
+CONFIG_PACKAGE_kmod-crypto-sha512=y
+CONFIG_PACKAGE_kmod-crypto-user=y
+CONFIG_PACKAGE_kmod-crypto-xxhash=y
+CONFIG_PACKAGE_kmod-dnsresolver=y
+CONFIG_PACKAGE_kmod-ikconfig=y
+CONFIG_PACKAGE_kmod-input-core=y
+CONFIG_PACKAGE_kmod-input-evdev=y
+CONFIG_PACKAGE_kmod-ip-vti=y
+CONFIG_PACKAGE_kmod-ip6-vti=y
+CONFIG_PACKAGE_kmod-ip6tables-extra=y
+CONFIG_PACKAGE_kmod-ipt-account=y
+CONFIG_PACKAGE_kmod-ipt-compat-xtables=y
+CONFIG_PACKAGE_kmod-ipt-condition=y
+CONFIG_PACKAGE_kmod-ipt-conntrack=y
+CONFIG_PACKAGE_kmod-ipt-conntrack-extra=y
+CONFIG_PACKAGE_kmod-ipt-conntrack-label=y
+CONFIG_PACKAGE_kmod-ipt-core=y
+CONFIG_PACKAGE_kmod-ipt-extra=y
+CONFIG_PACKAGE_kmod-ipt-filter=y
+CONFIG_PACKAGE_kmod-ipt-fuzzy=y
+CONFIG_PACKAGE_kmod-ipt-geoip=y
+CONFIG_PACKAGE_kmod-ipt-iface=y
+CONFIG_PACKAGE_kmod-ipt-ipmark=y
+CONFIG_PACKAGE_kmod-ipt-ipopt=y
+CONFIG_PACKAGE_kmod-ipt-ipp2p=y
+CONFIG_PACKAGE_kmod-ipt-iprange=y
+CONFIG_PACKAGE_kmod-ipt-ipsec=y
+CONFIG_PACKAGE_kmod-ipt-ipset=y
+CONFIG_PACKAGE_kmod-ipt-length2=y
+CONFIG_PACKAGE_kmod-ipt-logmark=y
+CONFIG_PACKAGE_kmod-ipt-lscan=y
+CONFIG_PACKAGE_kmod-ipt-lua=y
+CONFIG_PACKAGE_kmod-ipt-nat=y
+CONFIG_PACKAGE_kmod-ipt-nat6=y
+CONFIG_PACKAGE_kmod-ipt-nat-extra=y
+CONFIG_PACKAGE_kmod-ipt-nathelper-rtsp=y
+CONFIG_PACKAGE_kmod-ipt-offload=y
+CONFIG_PACKAGE_kmod-ipt-physdev=y
+CONFIG_PACKAGE_kmod-ipt-quota2=y
+CONFIG_PACKAGE_kmod-ipt-raw=y
+CONFIG_PACKAGE_kmod-ipt-socket=y
+CONFIG_PACKAGE_kmod-ipt-tproxy=y
+CONFIG_PACKAGE_kmod-keys-encrypted=y
+CONFIG_PACKAGE_kmod-keys-trusted=y
+CONFIG_PACKAGE_kmod-lib-cordic=y
+CONFIG_PACKAGE_kmod-lib-crc-itu-t=y
+CONFIG_PACKAGE_kmod-lib-crc16=y
+CONFIG_PACKAGE_kmod-lib-crc7=y
+CONFIG_PACKAGE_kmod-lib-lzo=y
+CONFIG_PACKAGE_kmod-lib-raid6=y
+CONFIG_PACKAGE_kmod-lib-textsearch=y
+CONFIG_PACKAGE_kmod-lib-xor=y
+CONFIG_PACKAGE_kmod-lib-zlib-deflate=y
+CONFIG_PACKAGE_kmod-lib-zlib-inflate=y
+CONFIG_PACKAGE_kmod-lib-zstd=y
+CONFIG_PACKAGE_kmod-mmc-spi=y
+CONFIG_PACKAGE_kmod-nf-conncount=y
+CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y
+CONFIG_PACKAGE_kmod-nf-ipt=y
+CONFIG_PACKAGE_kmod-nf-ipt6=y
+CONFIG_PACKAGE_kmod-nf-ipvs=y
+CONFIG_PACKAGE_kmod-nf-nat6=y
+CONFIG_PACKAGE_kmod-nf-nathelper=y
+CONFIG_PACKAGE_kmod-nf-nathelper-extra=y
+CONFIG_PACKAGE_kmod-nf-socket=y
+CONFIG_PACKAGE_kmod-nf-tproxy=y
+CONFIG_PACKAGE_kmod-nft-bridge=y
+CONFIG_PACKAGE_kmod-nft-compat=y
+CONFIG_PACKAGE_kmod-nft-netdev=y
+CONFIG_PACKAGE_kmod-nft-socket=y
+CONFIG_PACKAGE_kmod-nft-tproxy=y
+CONFIG_PACKAGE_kmod-nlmon=y
+CONFIG_PACKAGE_kmod-oaf=y
+CONFIG_PACKAGE_kmod-sched=y
+CONFIG_PACKAGE_kmod-sched-core=y
+# CONFIG_PACKAGE_kmod-struct-dump is not set
+EOF
+
+          # 显示 Config 前 50 行，确认导入成功
+          head -50 .config
+          echo "Config 文件导入完成"
+
+      - name: 6. 检查 Config 完整性（防止编译失败）
+        run: |
+          cd istoreos-src
+          # 定义必选配置项（硬件匹配 + QModem 依赖）
+          KEY_CONFIGS=(
+            "CONFIG_TARGET_rockchip_armv8=y"
+            "CONFIG_TARGET_DEVICE_rockchip_rk35xx_DEVICE_nlnet_xgp=y"
+            "CONFIG_PACKAGE_luci-app-qmodem=y"
+            "CONFIG_PACKAGE_modemmanager=y"
+            "CONFIG_PACKAGE_libqmi=y"
+            "CONFIG_PACKAGE_qmi-utils=y"
+            "CONFIG_PACKAGE_kmod-phy-realtek=y" # RTL8211F 网口
+            "CONFIG_PACKAGE_kmod-fb-gc9307=y" # GC9307 屏幕
+            "CONFIG_PACKAGE_kmod-pwm-rockchip=y" # PWM 风扇
+            "CONFIG_PACKAGE_kmod-gpio-button-hotplug=y" # 按钮
+            "CONFIG_PACKAGE_kmod-mhi-bus=y" # 5G 模块（RM500Q）
+            "CONFIG_PACKAGE_kmod-usb3=y" # USB3.0 OTG
+            "CONFIG_PACKAGE_kmod-mmc=y" # eMMC/TF 卡
+          )
+
+          # 检查必选配置项是否存在
+          for cfg in "${KEY_CONFIGS[@]}"; do
+            if ! grep -q "^$cfg" .config; then
+              echo "❌ 错误：缺失关键配置项 -> $cfg"
+              exit 1
+            fi
+          done
+
+          # 检查重复配置项（避免编译冲突）
+          DUPLICATE_CFG=$(grep -E "^CONFIG_.*=y" .config | sort | uniq -d)
+          if [ -n "$DUPLICATE_CFG" ]; then
+            echo "❌ 错误：存在重复配置项 -> $DUPLICATE_CFG"
+            exit 1
+          fi
+
+          # 检查 QModem 依赖包是否完整
+          QMODEM_DEPS=(
+            "libmbim" "libqrtr-glib" "umbim" "uqmi" "usb-modeswitch" "wwan"
+          )
+          for dep in "${QMODEM_DEPS[@]}"; do
+            if ! grep -q "CONFIG_PACKAGE_$dep=y" .config; then
+              echo "❌ 错误：QModem 缺失依赖包 -> $dep"
+              exit 1
+            fi
+          done
+
+          echo "✅ Config 检查通过，无缺失/重复项"
+
+      - name: 7. 生成完整配置 + 下载依赖包（避免编译中断）
+        run: |
+          cd istoreos-src
+          # 生成完整配置（补全 Config 中未显式声明的依赖）
+          make defconfig
+          # 下载所有编译依赖包（单独步骤，便于重试）
+          make download -j$(nproc) 2>&1 | tee -a $BUILD_LOG_FILE
+          # 检查下载是否成功
+          if [ $? -ne 0 ]; then
+            echo "❌ 依赖包下载失败，查看日志：$BUILD_LOG_FILE"
+            exit 1
+          fi
+          echo "✅ 依赖包下载完成"
+
+      - name: 8. 编译固件（日志控制：避免过大中断）
+        run: |
+          cd istoreos-src
+          # 编译参数：-j 线程数（nproc+1 平衡效率与稳定性）
+          # 日志控制：tee 写入文件，tail 限制实时输出行数
+          make -j$(($(nproc)+1)) V=s 2>&1 | tee -a $BUILD_LOG_FILE | tail -n $MAX_LOG_LINES
+          # 检查编译是否成功
+          if [ $? -ne 0 ]; then
+            echo "❌ 固件编译失败，完整日志：$BUILD_LOG_FILE"
+            exit 1
+          fi
+          # 压缩日志（减少上传体积）
+          gzip $BUILD_LOG_FILE
+          echo "✅ 固件编译完成"
+
+      - name: 9. 上传编译产物（固件 + 日志）
+        uses: actions/upload-artifact@v4
+        with:
+          name: istoreos-xgp-qmodem-firmware
+          path: |
+            istoreos-src/bin/targets/rockchip/rk35xx/* # 固件文件（sysupgrade/img 等）
+            istoreos-src/build.log.gz # 压缩后的编译日志
+          retention-days: 30 # 产物保留 30 天
