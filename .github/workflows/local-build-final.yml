@@ -17,9 +17,8 @@ jobs:
       TARGET_SUBPLATFORM: rk35xx
       FIRMWARE_DIST: istoreos
       ISTOREOS_BRANCH: "istoreos-24.10"
-      LOCAL_BUILD_DIR: "${{ github.workspace }}/build"  # 根目录
-      # 关键修复：同一env块内引用变量用${xxx}，而非${{ env.xxx }}
-      VENV_PATH: "${LOCAL_BUILD_DIR}/python-venv"  # 修复此处
+      LOCAL_BUILD_DIR: "${{ github.workspace }}/build"
+      VENV_PATH: "${LOCAL_BUILD_DIR}/python-venv"
 
     steps:
       - name: 1. 拉取仓库代码
@@ -27,20 +26,40 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 2. 系统依赖+Python虚拟环境配置
+      - name: 2. 系统依赖+Python虚拟环境配置（确保git安装）
         run: |
-          echo "===== 安装系统基础依赖 ====="
+          echo "===== 安装系统基础依赖（含git） ====="
+          # 明确包含git，确保被安装
           REQUIRED_PACKAGES="build-essential flex bison g++ gawk gcc-multilib \
-            gettext git libncurses5-dev libssl-dev libelf-dev python3 python3-pip \
+            gettext git  # 强制包含git
+            libncurses5-dev libssl-dev libelf-dev python3 python3-pip \
             python3-venv rsync unzip wget zlib1g-dev quilt u-boot-tools squashfs-tools \
             meson ninja-build cmake device-tree-compiler liblz4-tool"
 
+          # 安装缺失的依赖（重点检查git）
           for pkg in $REQUIRED_PACKAGES; do
             if ! dpkg -l | grep -q "$pkg"; then
               echo "安装缺失依赖：$pkg"
-              sudo apt update -y && sudo apt install -y "$pkg"
+              # 强制更新并安装，避免依赖冲突
+              sudo apt update -y || sudo apt update -y  # 重试更新
+              sudo apt install -y "$pkg" || {
+                echo "ERROR: 安装 $pkg 失败！"
+                exit 1
+              }
             fi
           done
+
+          # 单独验证git是否安装成功（核心修复点）
+          echo "===== 验证git是否可用 ====="
+          if ! command -v git &> /dev/null; then
+            echo "ERROR: git 未安装成功！手动重试安装..."
+            sudo apt install -y git --reinstall
+            # 再次验证，失败则终止
+            if ! command -v git &> /dev/null; then
+              echo "ERROR: git 始终安装失败，请手动检查系统包管理器！"
+              exit 1
+            fi
+          fi
 
           echo "===== 创建Python虚拟环境 ====="
           if [ -d "$VENV_PATH" ]; then
@@ -64,7 +83,8 @@ jobs:
           deactivate
 
           echo "===== 验证核心工具 ====="
-          REQUIRED_TOOLS="gcc make python3 wget unzip mksquashfs"
+          # 明确包含git的验证
+          REQUIRED_TOOLS="gcc make python3 git wget unzip mksquashfs"
           for tool in $REQUIRED_TOOLS; do
             if ! command -v $tool &> /dev/null; then
               echo "ERROR: 核心工具 $tool 未安装！"
@@ -82,17 +102,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-istoreos-${{ env.ISTOREOS_BRANCH }}-
 
-      - name: 4. 克隆/更新iStoreOS稳定分支
+      - name: 4. 克隆/更新iStoreOS稳定分支（依赖git）
         run: |
           mkdir -p ${{ env.LOCAL_BUILD_DIR }}
           cd ${{ env.LOCAL_BUILD_DIR }}
 
           if [ ! -d "${{ env.FIRMWARE_DIST }}" ]; then
-            git clone https://github.com/istoreos/istoreos.git ${{ env.FIRMWARE_DIST }}
+            # 显式使用git克隆，确保命令可用
+            git clone https://github.com/istoreos/istoreos.git ${{ env.FIRMWARE_DIST }} || {
+              echo "ERROR: git克隆失败，请检查网络或git安装！"
+              exit 1
+            }
           fi
           cd ${{ env.FIRMWARE_DIST }}
           git checkout ${{ env.ISTOREOS_BRANCH }}
-          git pull
+          git pull  # 拉取最新代码
 
           echo "当前分支：$(git branch --show-current)"
           echo "最新Commit：$(git rev-parse --short HEAD)"
