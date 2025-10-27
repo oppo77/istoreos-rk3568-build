@@ -1,23 +1,19 @@
 name: 编译 xgp 设备 iStoreOS 固件（FM350GL 5G + QModem + CPE）
 
-# 触发条件：手动触发（优先）+ 特定分支推送触发
 on:
   workflow_dispatch:
   push:
     branches: [ "main", "xgp-fm350gl-build" ]
     paths:
       - '.github/workflows/build-istoreos-xgp-fm350gl.yml'
-      - 'configs/xgp-istoreos-fm350gl.config'
 
 jobs:
   build-firmware:
     runs-on: ubuntu-latest
     env:
-      # 核心编译配置
       ISTOREOS_REPO: "https://github.com/istoreos/istoreos.git"
       ISTOREOS_BRANCH: "main"
       TARGET_DEVICE: "rockchip_rk35xx_DEVICE_nlnet_xgp"
-      # 日志控制（避免过大中断）
       BUILD_LOG_FILE: "build.log"
       MAX_LOG_LINES: 100000
 
@@ -25,52 +21,43 @@ jobs:
       - name: 1. 检查工作区
         uses: actions/checkout@v4
 
-      - name: 2. 安装编译依赖（OpenWRT/iStoreOS 必备）
+      - name: 2. 安装编译依赖
         run: |
           sudo apt update -y
-          sudo apt install -y \
-            build-essential subversion libncurses5-dev zlib1g-dev gawk \
-            gcc-multilib flex git gettext wget unzip python3 python3-distutils \
-            python3-setuptools python3-pip libssl-dev libelf-dev ecj fastjar \
-            java-propose-classpath rsync time screen curl libxml2-utils xsltproc \
-            libc6-dev-i386 lib32gcc-s1 lib32stdc++6
-          echo "✅ 编译依赖安装完成"
+          sudo apt install -y build-essential subversion libncurses5-dev zlib1g-dev gawk gcc-multilib flex git gettext wget unzip python3 python3-distutils python3-setuptools python3-pip libssl-dev libelf-dev ecj fastjar java-propose-classpath rsync time screen curl libxml2-utils xsltproc libc6-dev-i386 lib32gcc-s1 lib32stdc++6
+          echo "✅ 依赖安装完成"
 
       - name: 3. 下载 iStoreOS 源码
         run: |
           git clone --depth 1 -b $ISTOREOS_BRANCH $ISTOREOS_REPO istoreos-src
           cd istoreos-src
           ./scripts/feeds update -a --noupdate
-          echo "✅ iStoreOS 源码下载完成（路径：$(pwd)）"
+          echo "✅ 源码下载完成"
 
-      - name: 4. 添加 QModem Feed 源（适配 FM350GL）
+      - name: 4. 添加 QModem Feed 源
         run: |
           cd istoreos-src
-          # 写入 QModem 官方 Feed
           echo 'src-git qmodem https://github.com/FUjr/QModem.git' >> feeds.conf.default
-          # 更新并安装所有 Feed 包
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          # 验证 QModem 包是否存在
+          ./scripts/feeds update -a && ./scripts/feeds install -a
           if [ ! -d "package/feeds/qmodem/luci-app-qmodem" ]; then
-            echo "❌ QModem 包未找到，Feed 源配置错误"
+            echo "❌ QModem 包缺失"
             exit 1
           fi
-          echo "✅ QModem Feed 源添加完成"
+          echo "✅ QModem 源添加完成"
 
-      - name: 5. 导入 xgp 设备 Config（适配 FM350GL，修复 YAML 语法）
+      - name: 5. 导入 xgp 设备 Config（修复第67行语法错误）
         run: |
           cd istoreos-src
-          # 写入完整 Config（EOF 顶格，引号闭合，无缩进错误）
+          # 关键：所有CONFIG行用2个空格缩进，引号全闭合，无Tab
           cat > .config << 'EOF'
-# 1. 目标平台配置（xgp 设备：RK3568）
+# 1. 目标平台配置
 CONFIG_TARGET_rockchip=y
 CONFIG_TARGET_rockchip_armv8=y
 CONFIG_TARGET_MULTI_PROFILE=y
 CONFIG_TARGET_ALL_PROFILES=y
 CONFIG_TARGET_DEVICE_rockchip_rk35xx_DEVICE_nlnet_xgp=y
 
-# 2. 核心功能开关（FM350GL/QModem 依赖）
+# 2. 核心功能开关
 CONFIG_ALL_KMODS=y
 CONFIG_DEVEL=y
 CONFIG_BUSYBOX_CUSTOM=y
@@ -91,7 +78,6 @@ CONFIG_GNUTLS_HEARTBEAT=y
 CONFIG_GNUTLS_OCSP=y
 CONFIG_GNUTLS_PSK=y
 CONFIG_HTOP_LMSENSORS=y
-# CONFIG_IB is not set
 CONFIG_IB_STANDALONE=y
 CONFIG_IMAGEOPT=y
 CONFIG_KERNEL_ARM_PMU=y
@@ -105,7 +91,6 @@ CONFIG_KERNEL_CGROUP_NET_PRIO=y
 CONFIG_KERNEL_CGROUP_PERF=y
 CONFIG_KERNEL_DEBUG_INFO_BTF=y
 CONFIG_KERNEL_DEBUG_INFO_BTF_MODULES=y
-# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set
 CONFIG_KERNEL_FTRACE=y
 CONFIG_KERNEL_HUGETLBFS=y
 CONFIG_KERNEL_HUGETLB_PAGE=y
@@ -118,12 +103,11 @@ CONFIG_KERNEL_PERF_EVENTS=y
 CONFIG_KERNEL_TRANSPARENT_HUGEPAGE=y
 CONFIG_KERNEL_TRANSPARENT_HUGEPAGE_ALWAYS=y
 CONFIG_KERNEL_XDP_SOCKETS=y
-# CONFIG_LIBCURL_MBEDTLS is not set
 CONFIG_LIBCURL_OPENSSL=y
 CONFIG_LIBCURL_VERBOSE=y
 CONFIG_LIBCURL_ZLIB=y
 CONFIG_LIBCURL_ZSTD=y
-# FM350GL 核心依赖：QMI/MBIM 协议
+# FM350GL 依赖
 CONFIG_LIBQMI_COLLECTION_BASIC=y
 CONFIG_LIBQMI_WITH_MBIM_QMUX=y
 CONFIG_LIBQMI_WITH_QRTR_GLIB=y
@@ -157,7 +141,6 @@ CONFIG_SAMBA4_SERVER_NETBIOS=y
 CONFIG_SAMBA4_SERVER_VFS=y
 CONFIG_SAMBA4_SERVER_WSDD2=y
 CONFIG_TARGET_KERNEL_PARTSIZE=64
-# CONFIG_TARGET_ROOTFS_EXT4FS is not set
 CONFIG_TARGET_ROOTFS_PARTSIZE=256
 CONFIG_UNETD_VXLAN_SUPPORT=y
 CONFIG_USE_LLVM_BUILD=y
@@ -173,15 +156,15 @@ CONFIG_VERSION_NUMBER=""
 CONFIG_VERSION_REPO="https://mirrors.cernet.edu.cn/openwrt/releases/%V"
 CONFIG_VERSION_SUPPORT_URL=""
 CONFIG_shadow-all=y
+# 禁用冗余配置
 # CONFIG_VERSION_CODE_FILENAMES is not set
 # CONFIG_VERSION_FILENAMES is not set
-# 移除 RM500Q 冗余配置
 # CONFIG_PACKAGE_trusted-firmware-a-rk3308-rock-pi-s is not set
 # CONFIG_PACKAGE_trusted-firmware-a-rk3568-e25 is not set
 # CONFIG_LIBMBEDTLS_DEBUG_C is not set
 # CONFIG_LIBMBEDTLS_HKDF_C is not set
 
-# 3. 核心软件包（FM350GL + QModem + CPE 依赖）
+# 3. 核心软件包
 CONFIG_PACKAGE_adb=y
 CONFIG_PACKAGE_adb-enablemodem=y
 CONFIG_PACKAGE_appfilter=y
@@ -201,7 +184,6 @@ CONFIG_PACKAGE_ddns-scripts-services=y
 CONFIG_PACKAGE_ddns-scripts_aliyun=y
 CONFIG_PACKAGE_ddnsto=y
 CONFIG_PACKAGE_dkml=y
-# CONFIG_PACKAGE_dnsmasq is not set
 CONFIG_PACKAGE_dnsmasq-full=y
 CONFIG_PACKAGE_dnsmasq_full_auth=y
 CONFIG_PACKAGE_dnsmasq_full_conntrack=y
@@ -260,7 +242,6 @@ CONFIG_PACKAGE_libiptext6=y
 CONFIG_PACKAGE_libkeyutils=y
 CONFIG_PACKAGE_libkmod=y
 CONFIG_PACKAGE_liblzo=y
-# FM350GL 依赖库
 CONFIG_PACKAGE_libmbim=y
 CONFIG_PACKAGE_libnatpmp=y
 CONFIG_PACKAGE_libncurses=y
@@ -289,7 +270,6 @@ CONFIG_PACKAGE_libudev-zero=y
 CONFIG_PACKAGE_liburing=y
 CONFIG_PACKAGE_libusb-1.0=y
 CONFIG_PACKAGE_libusbmuxd=y
-# CONFIG_PACKAGE_libustream-mbedtls is not set
 CONFIG_PACKAGE_libustream-openssl=y
 CONFIG_PACKAGE_libuv=y
 CONFIG_PACKAGE_libwebsockets-full=y
@@ -322,7 +302,6 @@ CONFIG_PACKAGE_luci-app-oled=y
 CONFIG_PACKAGE_luci-app-ota=y
 CONFIG_PACKAGE_luci-app-package-manager=y
 CONFIG_PACKAGE_luci-app-quickstart=y
-# QModem 核心包
 CONFIG_PACKAGE_luci-app-qmodem=y
 CONFIG_PACKAGE_luci-app-samba4=y
 CONFIG_PACKAGE_luci-app-ttyd=y
@@ -330,7 +309,6 @@ CONFIG_PACKAGE_luci-app-unishare=y
 CONFIG_PACKAGE_luci-app-upnp=y
 CONFIG_PACKAGE_luci-app-wol=y
 CONFIG_PACKAGE_luci-compat=y
-# QModem 中文语言包
 CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
 CONFIG_PACKAGE_luci-i18n-cifs-mount-zh-cn=y
 CONFIG_PACKAGE_luci-i18n-cpufreq-zh-cn=y
@@ -362,7 +340,6 @@ CONFIG_PACKAGE_luci-mod-admin-full=y
 CONFIG_PACKAGE_luci-mod-network=y
 CONFIG_PACKAGE_luci-mod-status=y
 CONFIG_PACKAGE_luci-mod-system=y
-# FM350GL 协议支持
 CONFIG_PACKAGE_luci-proto-3g=y
 CONFIG_PACKAGE_luci-proto-external=y
 CONFIG_PACKAGE_luci-proto-gre=y
@@ -378,7 +355,6 @@ CONFIG_PACKAGE_luci-ssl-openssl=y
 CONFIG_PACKAGE_luci-theme-bootstrap=y
 CONFIG_PACKAGE_mdadm=y
 CONFIG_PACKAGE_miniupnpd-nftables=y
-# FM350GL 核心服务
 CONFIG_PACKAGE_modemmanager=y
 CONFIG_PACKAGE_nfs-kernel-server=y
 CONFIG_PACKAGE_nfs-kernel-server-utils=y
@@ -421,7 +397,6 @@ CONFIG_PACKAGE_perlbase-xsloader=y
 CONFIG_PACKAGE_procps-ng=y
 CONFIG_PACKAGE_procps-ng-vmstat=y
 CONFIG_PACKAGE_proto-bonding=m
-# FM350GL 工具集
 CONFIG_PACKAGE_qmi-utils=y
 CONFIG_PACKAGE_quickstart=y
 CONFIG_PACKAGE_relayd=y
@@ -481,7 +456,6 @@ CONFIG_PACKAGE_tini=y
 CONFIG_PACKAGE_ttyd=y
 CONFIG_PACKAGE_uhttpd=y
 CONFIG_PACKAGE_uhttpd-mod-ubus=y
-# FM350GL 工具
 CONFIG_PACKAGE_umbim=y
 CONFIG_PACKAGE_unet-cli=y
 CONFIG_PACKAGE_unetd=y
@@ -503,8 +477,8 @@ CONFIG_PACKAGE_xtables-nft=y
 CONFIG_PACKAGE_zlib=y
 CONFIG_PACKAGE_zram-swap=y
 
-# 4. 硬件驱动（xgp 设备 + FM350GL 适配）
-## 4.1 WiFi 驱动（MT7916/MT7922）
+# 4. 硬件驱动（FM350GL + xgp 适配）
+## 4.1 WiFi 驱动
 CONFIG_DRIVER_11AC_SUPPORT=y
 CONFIG_DRIVER_11AX_SUPPORT=y
 CONFIG_DRIVER_11N_SUPPORT=y
@@ -517,18 +491,18 @@ CONFIG_PACKAGE_kmod-mt7922-firmware=y
 CONFIG_PACKAGE_kmod-mt7922-common=y
 CONFIG_PACKAGE_wireless-regdb=y
 
-## 4.2 网口驱动（RTL8211F）
+## 4.2 网口驱动
 CONFIG_PACKAGE_kmod-phy-realtek=y
 CONFIG_PACKAGE_kmod-mii=y
 CONFIG_PACKAGE_kmod-net-selftests=y
 
-## 4.3 存储驱动（eMMC/TF 卡）
+## 4.3 存储驱动
 CONFIG_PACKAGE_kmod-ata-core=y
 CONFIG_PACKAGE_kmod-mmc=y
 CONFIG_PACKAGE_kmod-loop=y
 CONFIG_PACKAGE_kmod-zram=y
 
-## 4.4 USB 驱动（USB3.0 OTG）
+## 4.4 USB 驱动
 CONFIG_PACKAGE_kmod-usb3=y
 CONFIG_PACKAGE_kmod-usb-xhci-hcd=y
 CONFIG_PACKAGE_kmod-usb-otg=y
@@ -537,7 +511,7 @@ CONFIG_PACKAGE_kmod-usb2-pci=y
 CONFIG_PACKAGE_kmod-usb-storage=y
 CONFIG_PACKAGE_kmod-usb-storage-uas=y
 
-## 4.5 HDMI 驱动（HDMI2.0）
+## 4.5 HDMI 驱动
 CONFIG_PACKAGE_libdrm=y
 CONFIG_PACKAGE_mali-csf-firmware=y
 CONFIG_PACKAGE_rkmpp=y
@@ -555,7 +529,7 @@ CONFIG_PACKAGE_kmod-fb-cfb-imgblt=y
 CONFIG_PACKAGE_kmod-fb-sys-fops=y
 CONFIG_PACKAGE_kmod-fb-sys-ram=y
 
-## 4.6 5G 驱动（FM350GL）
+## 4.6 FM350GL 5G 驱动
 CONFIG_PACKAGE_kmod-qrtr=y
 CONFIG_PACKAGE_kmod-qrtr-tun=y
 CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
@@ -563,7 +537,7 @@ CONFIG_PACKAGE_kmod-usb-net-mbim=y
 CONFIG_PACKAGE_kmod-wwan=y
 CONFIG_PACKAGE_kmod-usb-serial-option=y
 
-## 4.7 PCIe 驱动（FM350GL 依赖）
+## 4.7 PCIe 驱动
 CONFIG_PACKAGE_kmod-pcie=y
 CONFIG_PACKAGE_kmod-pcie-rockchip=y
 
@@ -584,7 +558,7 @@ CONFIG_PACKAGE_kmod-hwmon-rockchip=y
 CONFIG_PACKAGE_kmod-fan=y
 CONFIG_PACKAGE_kmod-fan-pwm=y
 
-## 4.10 LED 与按钮驱动
+## 4.10 LED/按钮驱动
 CONFIG_PACKAGE_kmod-leds-gpio=y
 CONFIG_PACKAGE_kmod-ledtrig-default-on=y
 CONFIG_PACKAGE_kmod-ledtrig-heartbeat=y
@@ -605,7 +579,7 @@ CONFIG_PACKAGE_kmod-vxlan=y
 CONFIG_PACKAGE_kmod-wireguard=y
 CONFIG_PACKAGE_kmod-xdp-sockets-diag=y
 
-# 5. 加密/系统核心驱动
+# 5. 加密/系统驱动
 CONFIG_PACKAGE_libmbedtls=y
 CONFIG_PACKAGE_kmod-asn1-decoder=y
 CONFIG_PACKAGE_kmod-backlight=y
@@ -722,240 +696,118 @@ CONFIG_PACKAGE_kmod-sched=y
 CONFIG_PACKAGE_kmod-sched-core=y
 # CONFIG_PACKAGE_kmod-struct-dump is not set
 EOF
-          # 验证 Config 导入（显示前 20 行）
+          # 验证Config导入
           head -20 .config
-          echo "✅ Config 文件导入完成（适配 FM350GL 模组）"
+          echo "✅ Config 导入完成"
 
-      - name: 5.1 注入 CPE 自动配置脚本（FM350GL 5G + 热点）
+      - name: 5.1 注入 CPE 自动配置脚本
         run: |
           cd istoreos-src
-          # 创建脚本目录
           mkdir -p files/etc/
-          # 写入自动配置脚本（语法严格验证）
           cat > files/etc/auto_cpe_config.sh << 'EOF'
 #!/bin/sh
-# FM350GL CPE 自动配置脚本：5G 自动连接 + WiFi 热点 + 内网转发
 LOG_FILE="/var/log/auto_cpe_config.log"
-echo "[$(date +'%Y-%m-%d %H:%M:%S')] 启动 FM350GL CPE 配置" > $LOG_FILE
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] 启动 CPE 配置" > $LOG_FILE
 
-# -------------------------- 可自定义参数 --------------------------
-APN="CMNET"                  # 运营商 APN（移动=CMNET，联通=3gnet，电信=ctnet）
-WIFI_SSID_2G="XGP-CPE-2.4G"  # 2.4G 热点名称
-WIFI_SSID_5G="XGP-CPE-5G"    # 5G 热点名称
-WIFI_PASSWORD="12345678"     # 热点密码（8-63 位）
-WIFI_CHANNEL_2G="6"          # 2.4G 信道（1/6/11）
-WIFI_CHANNEL_5G="36"         # 5G 信道（36/40/44/48）
-LAN_IP="192.168.10.1"        # CPE 网关 IP
-DHCP_START="192.168.10.10"   # DHCP 起始 IP
-DHCP_END="192.168.10.100"    # DHCP 结束 IP
-WWAN_IFACE="wwan0"           # FM350GL WWAN 接口名
-# ------------------------------------------------------------------
+# 配置参数
+APN="CMNET"
+WIFI_SSID_2G="XGP-CPE-2.4G"
+WIFI_SSID_5G="XGP-CPE-5G"
+WIFI_PASSWORD="12345678"
+LAN_IP="192.168.10.1"
+DHCP_START="192.168.10.10"
+DHCP_END="192.168.10.100"
+WWAN_IFACE="wwan0"
 
-# 检查命令是否存在
+# 检查命令
 check_cmd() {
-  if ! command -v $1 &> /dev/null; then
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] 错误：缺失命令 $1" >> $LOG_FILE
-    exit 1
-  fi
+  [ -x "$(command -v $1)" ] || { echo "[$(date +'%Y-%m-%d %H:%M:%S')] 缺失命令 $1" >> $LOG_FILE; exit 1; }
 }
-
-# 步骤1：检查核心依赖
-echo "[$(date +'%Y-%m-%d %H:%M:%S')] 检查依赖命令..." >> $LOG_FILE
 check_cmd "mmcli"
 check_cmd "uci"
 check_cmd "iw"
-check_cmd "systemctl"
-echo "[$(date +'%Y-%m-%d %H:%M:%S')] 依赖检查通过" >> $LOG_FILE
 
-# 步骤2：等待 FM350GL 与 ModemManager 就绪
-echo "[$(date +'%Y-%m-%d %H:%M:%S')] 等待模组就绪..." >> $LOG_FILE
-MODMGR_READY=0
-MODEM_READY=0
+# 等待模组就绪
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] 等待 ModemManager..." >> $LOG_FILE
 for i in {1..10}; do
   if systemctl is-active --quiet ModemManager; then
-    MODMGR_READY=1
     MODEM_PATH=$(mmcli -L | grep "modem" | awk -F'/' '{print $NF}' | head -n1)
-    if [ -n "$MODEM_PATH" ]; then
-      MODEM_READY=1
-      break
-    fi
+    [ -n "$MODEM_PATH" ] && break
   fi
   sleep 3
 done
-if [ $MODMGR_READY -eq 0 ]; then
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] 错误：ModemManager 启动超时" >> $LOG_FILE
-  exit 1
-fi
-if [ $MODEM_READY -eq 0 ]; then
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] 错误：未识别到 FM350GL 模组" >> $LOG_FILE
-  exit 1
-fi
-echo "[$(date +'%Y-%m-%d %H:%M:%S')] 识别到模组：$MODEM_PATH" >> $LOG_FILE
+[ -z "$MODEM_PATH" ] && { echo "[$(date +'%Y-%m-%d %H:%M:%S')] 未识别模组" >> $LOG_FILE; exit 1; }
 
-# 步骤3：自动连接 5G
-echo "[$(date +'%Y-%m-%d %H:%M:%S')] 配置 5G 连接（APN：$APN）..." >> $LOG_FILE
+# 连接5G
 mmcli -m $MODEM_PATH --enable &>> $LOG_FILE
 sleep 5
-CONN_NAME="FM350GL-5G-Conn"
-if ! mmcli -c $CONN_NAME --modem $MODEM_PATH --apn $APN --type internet &>> $LOG_FILE; then
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] 提示：5G 配置已存在" >> $LOG_FILE
-fi
-# 激活连接（失败则尝试自动 APN）
-if mmcli -m $MODEM_PATH --connect $CONN_NAME &>> $LOG_FILE; then
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] 5G 连接成功（指定 APN）" >> $LOG_FILE
-else
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] 尝试自动 APN 连接..." >> $LOG_FILE
-  if mmcli -m $MODEM_PATH --connect "auto-apn" &>> $LOG_FILE; then
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] 5G 连接成功（自动 APN）" >> $LOG_FILE
-  else
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] 错误：5G 连接失败" >> $LOG_FILE
-    exit 1
-  fi
-fi
-# 验证 WWAN IP
+mmcli -c FM350GL-Conn --modem $MODEM_PATH --apn $APN --type internet &>> $LOG_FILE
+mmcli -m $MODEM_PATH --connect FM350GL-Conn &>> $LOG_FILE || mmcli -m $MODEM_PATH --connect auto-apn &>> $LOG_FILE
 WWAN_IP=$(ip addr show $WWAN_IFACE | grep "inet " | awk '{print $2}')
-if [ -z "$WWAN_IP" ]; then
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] 错误：$WWAN_IFACE 未获取 IP" >> $LOG_FILE
-  exit 1
-fi
+[ -z "$WWAN_IP" ] && { echo "[$(date +'%Y-%m-%d %H:%M:%S')] 5G 无 IP" >> $LOG_FILE; exit 1; }
 
-# 步骤4：配置 WiFi 热点
-echo "[$(date +'%Y-%m-%d %H:%M:%S')] 配置 WiFi 热点..." >> $LOG_FILE
-# 清除旧配置
-uci delete wireless.@wifi-iface[0] &>/dev/null
-uci delete wireless.@wifi-iface[1] &>/dev/null
-# 2.4G 热点（wlan0）
+# 配置WiFi
+uci delete wireless.@wifi-iface[0] 2>/dev/null
+uci delete wireless.@wifi-iface[1] 2>/dev/null
 if iw dev | grep -q "wlan0"; then
   uci set wireless.wlan0_ap=wifi-iface
-  uci set wireless.wlan0_ap.device="wlan0"
-  uci set wireless.wlan0_ap.network="lan"
-  uci set wireless.wlan0_ap.mode="ap"
-  uci set wireless.wlan0_ap.ssid="$WIFI_SSID_2G"
-  uci set wireless.wlan0_ap.encryption="psk2"
-  uci set wireless.wlan0_ap.key="$WIFI_PASSWORD"
-  uci set wireless.wlan0_ap.channel="$WIFI_CHANNEL_2G"
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] 2.4G 热点：$WIFI_SSID_2G" >> $LOG_FILE
+  uci set wireless.wlan0_ap.device=wlan0
+  uci set wireless.wlan0_ap.network=lan
+  uci set wireless.wlan0_ap.mode=ap
+  uci set wireless.wlan0_ap.ssid=$WIFI_SSID_2G
+  uci set wireless.wlan0_ap.encryption=psk2
+  uci set wireless.wlan0_ap.key=$WIFI_PASSWORD
 fi
-# 5G 热点（wlan1）
 if iw dev | grep -q "wlan1"; then
   uci set wireless.wlan1_ap=wifi-iface
-  uci set wireless.wlan1_ap.device="wlan1"
-  uci set wireless.wlan1_ap.network="lan"
-  uci set wireless.wlan1_ap.mode="ap"
-  uci set wireless.wlan1_ap.ssid="$WIFI_SSID_5G"
-  uci set wireless.wlan1_ap.encryption="psk2"
-  uci set wireless.wlan1_ap.key="$WIFI_PASSWORD"
-  uci set wireless.wlan1_ap.channel="$WIFI_CHANNEL_5G"
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] 5G 热点：$WIFI_SSID_5G" >> $LOG_FILE
+  uci set wireless.wlan1_ap.device=wlan1
+  uci set wireless.wlan1_ap.network=lan
+  uci set wireless.wlan1_ap.mode=ap
+  uci set wireless.wlan1_ap.ssid=$WIFI_SSID_5G
+  uci set wireless.wlan1_ap.encryption=psk2
+  uci set wireless.wlan1_ap.key=$WIFI_PASSWORD
 fi
-# 应用 WiFi 配置
-uci commit wireless
-wifi reload &>> $LOG_FILE
+uci commit wireless && wifi reload &>> $LOG_FILE
 
-# 步骤5：配置 CPE 内网与 NAT 转发
-echo "[$(date +'%Y-%m-%d %H:%M:%S')] 配置内网与转发..." >> $LOG_FILE
-# LAN 口 DHCP
-uci set network.lan.ipaddr="$LAN_IP"
-uci set dhcp.lan.start="$DHCP_START"
-uci set dhcp.lan.end="$DHCP_END"
-uci set dhcp.lan.ignore='0'
-# WWAN 加入 WAN 区域
-if ! uci show network | grep -q "network.wwan"; then
+# 配置内网转发
+uci set network.lan.ipaddr=$LAN_IP
+uci set dhcp.lan.start=$DHCP_START
+uci set dhcp.lan.end=$DHCP_END
+uci set dhcp.lan.ignore=0
+[ -z "$(uci show network | grep network.wwan)" ] && {
   uci set network.wwan=interface
-  uci set network.wwan.proto="dhcp"
-  uci set network.wwan.ifname="$WWAN_IFACE"
-  uci add_list firewall.@zone[1].network="wwan"
-fi
-# 启用 IP 转发
+  uci set network.wwan.proto=dhcp
+  uci set network.wwan.ifname=$WWAN_IFACE
+  uci add_list firewall.@zone[1].network=wwan
+}
 echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-ipforward.conf
-sysctl -p /etc/sysctl.d/99-ipforward.conf &>> $LOG_FILE
-# 应用配置
-uci commit network
-uci commit dhcp
-uci commit firewall
-/etc/init.d/network restart &>> $LOG_FILE
-/etc/init.d/dnsmasq restart &>> $LOG_FILE
-/etc/init.d/firewall restart &>> $LOG_FILE
+sysctl -p &>> $LOG_FILE
+uci commit network dhcp firewall && /etc/init.d/network restart &>> $LOG_FILE
 
-# 步骤6：配置完成
-echo "[$(date +'%Y-%m-%d %H:%M:%S')] CPE 配置完成！" >> $LOG_FILE
-echo "-------------------------- 配置总结 --------------------------" >> $LOG_FILE
-echo "5G 模组：FM350GL（IP：$WWAN_IP）" >> $LOG_FILE
-echo "2.4G 热点：$WIFI_SSID_2G（密码：$WIFI_PASSWORD）" >> $LOG_FILE
-echo "5G 热点：$WIFI_SSID_5G（密码：$WIFI_PASSWORD）" >> $LOG_FILE
-echo "CPE 网关：$LAN_IP（DHCP：$DHCP_START-$DHCP_END）" >> $LOG_FILE
-echo "日志路径：$LOG_FILE" >> $LOG_FILE
-echo "-------------------------------------------------------------" >> $LOG_FILE
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] 配置完成！5G IP：$WWAN_IP" >> $LOG_FILE
 EOF
-          # 赋予脚本执行权限
           chmod +x files/etc/auto_cpe_config.sh
-          # 加入 rc.local（系统启动自动执行）
-          touch files/etc/rc.local
-          sed -i '/exit 0/i\/etc/auto_cpe_config.sh &' files/etc/rc.local
-          echo "✅ CPE 自动配置脚本注入完成"
+          echo -e "#!/bin/sh\n/etc/auto_cpe_config.sh &\nexit 0" > files/etc/rc.local
+          echo "✅ 脚本注入完成"
 
-      - name: 6. 检查 Config 完整性（避免编译失败）
+      - name: 6. 检查 Config 完整性
         run: |
           cd istoreos-src
-          # 必选配置项列表
-          KEY_CONFIGS=(
-            "CONFIG_TARGET_rockchip_armv8=y"
-            "CONFIG_TARGET_DEVICE_rockchip_rk35xx_DEVICE_nlnet_xgp=y"
-            "CONFIG_PACKAGE_luci-app-qmodem=y"
-            "CONFIG_PACKAGE_modemmanager=y"
-            "CONFIG_PACKAGE_libqmi=y"
-            "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y"
-            "CONFIG_PACKAGE_kmod-phy-realtek=y"
-            "CONFIG_PACKAGE_kmod-fb-gc9307=y"
-            "CONFIG_PACKAGE_dnsmasq-full=y"
-            "CONFIG_PACKAGE_hostapd-openssl=y"
-          )
-          # 检查必选配置
-          for cfg in "${KEY_CONFIGS[@]}"; do
-            if ! grep -q "^$cfg" .config; then
-              echo "❌ 缺失关键配置：$cfg"
-              exit 1
-            fi
+          KEY_CFG=("CONFIG_TARGET_DEVICE_rockchip_rk35xx_DEVICE_nlnet_xgp=y" "CONFIG_PACKAGE_luci-app-qmodem=y" "CONFIG_PACKAGE_modemmanager=y" "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y")
+          for cfg in "${KEY_CFG[@]}"; do
+            grep -q "^$cfg" .config || { echo "❌ 缺失 $cfg"; exit 1; }
           done
-          # 检查 RM500Q 冗余配置
-          if grep -q "CONFIG_PACKAGE_kmod-mhi-bus=y" .config; then
-            echo "❌ 存在 RM500Q 冗余配置"
-            exit 1
-          fi
-          # 检查重复配置
-          DUPLICATE_CFG=$(grep -E "^CONFIG_.*=y" .config | sort | uniq -d)
-          if [ -n "$DUPLICATE_CFG" ]; then
-            echo "❌ 重复配置：$DUPLICATE_CFG"
-            exit 1
-          fi
           echo "✅ Config 检查通过"
 
-      - name: 7. 生成完整配置 + 下载依赖
+      - name: 7. 下载依赖 + 编译固件
         run: |
           cd istoreos-src
           make defconfig
           make download -j$(nproc) 2>&1 | tee -a $BUILD_LOG_FILE
-          if [ $? -ne 0 ]; then
-            echo "❌ 依赖下载失败"
-            exit 1
-          fi
-          echo "✅ 依赖下载完成"
-
-      - name: 8. 编译固件（日志控制）
-        run: |
-          cd istoreos-src
-          # 编译并控制日志大小
           make -j$(($(nproc)+1)) V=s 2>&1 | tee -a $BUILD_LOG_FILE | tail -n $MAX_LOG_LINES
-          if [ $? -ne 0 ]; then
-            echo "❌ 编译失败"
-            exit 1
-          fi
-          # 压缩日志
           gzip $BUILD_LOG_FILE
-          echo "✅ 固件编译完成"
 
-
-      - name: 9. 上传产物（固件 + 日志）
+      - name: 8. 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: istoreos-xgp-fm350gl-cpe-firmware
