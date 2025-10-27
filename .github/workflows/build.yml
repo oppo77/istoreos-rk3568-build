@@ -1,152 +1,174 @@
-name: Build iStoreOS for RK3568 with 5G Modem Support
+name: Fast Build iStoreOS for RK3568
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
     paths:
       - '.config'
       - 'files/**'
-      - '.github/workflows/**'
   workflow_dispatch:
     inputs:
       clean_build:
-        description: 'Clean build (remove previous build files)'
+        description: 'Clean build'
         required: false
         default: false
         type: boolean
 
 env:
   BUILD_DIR: istoreos-src
-  MAX_JOBS: 4  # 限制并行任务数防止内存溢出
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 180  # 3小时超时
     
-    strategy:
-      matrix:
-        include:
-          - device: nlnet_xgp
-            target: rockchip/armv8
-
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        submodules: recursive
 
-    - name: Setup swap space (防止内存溢出)
+    - name: Setup 4GB swap space (防止内存溢出)
       run: |
-        sudo fallocate -l 4G /swapfile
+        echo "设置4GB交换空间..."
+        sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
         sudo chmod 600 /swapfile
         sudo mkswap /swapfile
         sudo swapon /swapfile
+        sudo sysctl vm.swappiness=10  # 降低交换倾向，优先使用物理内存
+        echo "当前内存状态:"
         free -h
+        echo "交换空间状态:"
+        swapon --show
 
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
           build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-          gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
-          python3-distutils rsync unzip zlib1g-dev file wget \
-          cmake pkg-config libtool automake autoconf \
-          subversion mercurial time
+          gettext git libncurses5-dev libssl-dev libelf-dev \
+          python3-distutils rsync unzip zlib1g-dev file wget
 
     - name: Clone iStoreOS source
       run: |
         git clone https://github.com/istoreos/istoreos.git $BUILD_DIR --depth=1 --branch=istoreos-24.10
-        cd $BUILD_DIR
 
-    - name: Clone 5G-Modem-Support
+    - name: Add 5G-Modem-Support
       run: |
         cd $BUILD_DIR
         git clone https://github.com/Siriling/5G-Modem-Support.git package/5g-modem-support
-        # 添加5G模块到feeds
-        echo "src-git modem_support https://github.com/Siriling/5G-Modem-Support.git" >> feeds.conf.default
 
-    - name: Clean previous build (可选)
+    - name: Clean previous build
       if: inputs.clean_build == true
       run: |
         cd $BUILD_DIR
         make clean
 
-    - name: Load custom config
+    - name: Copy configuration and files
       run: |
         cp .config $BUILD_DIR/.config
+        mkdir -p $BUILD_DIR/files
+        cp -rf files/* $BUILD_DIR/files/ 2>/dev/null || echo "No custom files"
 
-    - name: Copy custom files
-      run: |
-        cp -rf files/* $BUILD_DIR/files/ 2>/dev/null || true
-
-    - name: Update and install feeds
+    - name: Update and install feeds (静默模式)
       run: |
         cd $BUILD_DIR
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-        # 特别安装5G相关包
-        ./scripts/feeds install quectel-cm-5g quectel_Gobinet quectel_MHI modemmanager
+        ./scripts/feeds update -a > /dev/null 2>&1
+        ./scripts/feeds install -a > /dev/null 2>&1
 
-    - name: Configure build
+    - name: Download sources
       run: |
         cd $BUILD_DIR
-        make defconfig
-        # 应用我们的自定义配置
-        scripts/diffconfig.sh > config_diff
-        cat config_diff
+        echo "开始下载源码包..."
+        make -j$(nproc) download V=0 2>&1 | grep -E "(ERROR|error|failed|Download)" || true
+        echo "下载完成"
 
-    - name: Download sources (限制内存使用)
+    - name: Build firmware (全速编译)
       run: |
         cd $BUILD_DIR
-        # 限制并行下载和编译任务数
-        make -j2 download V=sc 2>&1 | head -1000
-        echo "Download completed"
+        # 快速配置
+        make defconfig > /dev/null 2>&1
+        
+        echo "开始全速编译，CPU核心数: $(nproc)"
+        echo "编译开始时间: $(date)"
+        
+        # 使用所有核心编译，但限制日志输出
+        timeout 7200 make -j$(nproc) V=0 2>&1 | tail -200
+        
+        echo "编译结束时间: $(date)"
+        echo "编译完成"
 
-    - name: Build toolchain (分步构建减少内存压力)
+    - name: Clean build artifacts (智能清理)
       run: |
         cd $BUILD_DIR
-        make -j$MAX_JOBS toolchain/install V=s 2>&1 | tail -500
+        echo "=== 开始清理临时文件 ==="
+        echo "清理前磁盘使用:"
+        df -h .
+        du -sh . 2>/dev/null || true
+        
+        # 清理编译中间文件但保留工具链
+        echo "清理对象文件..."
+        find build_dir -name "*.o" -delete 2>/dev/null || true
+        find build_dir -name "*.d" -delete 2>/dev/null || true
+        find build_dir -name ".*.cmd" -delete 2>/dev/null || true
+        
+        echo "清理临时目录..."
+        rm -rf tmp/* 2>/dev/null || true
+        rm -rf logs/* 2>/dev/null || true
+        
+        # 清理大型日志文件但保留必要信息
+        find . -name "*.log" -size +5M -delete 2>/dev/null || true
+        
+        echo "清理后磁盘使用:"
+        df -h .
+        echo "固件目录大小:"
+        du -sh bin/targets/ 2>/dev/null || true
 
-    - name: Build kernel (分步构建)
+    - name: Check firmware artifacts
       run: |
         cd $BUILD_DIR
-        make -j$MAX_JOBS target/compile V=s 2>&1 | tail -1000
+        echo "=== 生成的固件文件 ==="
+        find bin/targets -name "*.img" -o -name "*.gz" -o -name "*.zip" 2>/dev/null | xargs ls -lh 2>/dev/null || echo "未找到固件文件"
+        
+        # 检查文件完整性
+        if find bin/targets -name "*.img.gz" 2>/dev/null | grep -q .; then
+            echo "固件生成成功"
+            du -sh bin/targets/rockchip/armv8/*.img.gz 2>/dev/null || true
+        else
+            echo "警告: 未找到固件文件"
+            # 列出bin目录内容以便调试
+            find bin/targets -type f 2>/dev/null | head -20 || true
+        fi
 
-    - name: Build packages (分步构建)
-      run: |
-        cd $BUILD_DIR
-        make -j$MAX_JOBS package/compile V=s 2>&1 | tail -1500
-
-    - name: Build firmware image
-      run: |
-        cd $BUILD_DIR
-        make -j$MAX_JOBS V=s 2>&1 | tail -2000
-
-    - name: Check build artifacts
-      run: |
-        cd $BUILD_DIR
-        find bin/targets -name "*.img" -o -name "*.gz" | head -10
-        du -sh bin/targets/*
-
-    - name: Upload firmware artifacts
+    - name: Upload firmware
+      if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: istoreos-rk3568-5g-firmware
-        path: ${{ env.BUILD_DIR }}/bin/targets/rockchip/armv8/*.img.gz
+        name: istoreos-rk3568-$(date +%Y%m%d-%H%M%S)
+        path: |
+          ${{ env.BUILD_DIR }}/bin/targets/rockchip/armv8/*.img.gz
+          ${{ env.BUILD_DIR }}/bin/targets/rockchip/armv8/*.zip
         retention-days: 30
+        compression-level: 0  # 已经压缩过，不再重复压缩
 
-    - name: Upload build logs
+    - name: Upload build info
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: build-logs
+        name: build-info-$(date +%Y%m%d-%H%M%S)
         path: |
-          ${{ env.BUILD_DIR }}/logs/
-          ${{ env.BUILD_DIR }}/build.log
+          ${{ env.BUILD_DIR }}/.config
+          ${{ env.BUILD_DIR }}/feeds.conf.default
         retention-days: 7
 
-    - name: Cleanup swap
+    - name: Final cleanup
       if: always()
       run: |
-        sudo swapoff /swapfile || true
-        sudo rm -f /swapfile || true
+        echo "=== 最终清理 ==="
+        # 关闭交换空间
+        sudo swapoff /swapfile 2>/dev/null || true
+        sudo rm -f /swapfile 2>/dev/null || true
+        
+        # 显示最终磁盘状态
+        echo "最终磁盘状态:"
+        df -h
+        echo "内存状态:"
+        free -h
