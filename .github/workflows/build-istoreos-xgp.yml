@@ -90,13 +90,15 @@ jobs:
           cd $FIRMWARE_DIST
           make prereq V=99 2>&1 | tee prereq.log
 
-      - name: 7. 编译固件
+      - name: 7. 编译固件（优化日志，避免截断）
         run: |
           cd $FIRMWARE_DIST
-          make -j1 V=s 2>&1 | tee build.log
+          # 核心修改：将V=s（详细日志）改为V=m（精简日志），减少输出量
+          make -j1 V=m 2>&1 | tee build.log
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
+          # 失败时输出更多日志（1000行），便于排查问题
           [ -d "$FIRMWARE_DIR" ] && [ -n "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ] || {
-            cat build.log | tail -500
+            cat build.log | tail -1000
             exit 1
           }
 
