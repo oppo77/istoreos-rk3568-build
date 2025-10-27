@@ -47,12 +47,12 @@ jobs:
         run: |
           cd $FIRMWARE_DIST
           # 下面是你的真实配置文件链接，已直接写入，无需修改
-          REAL_CONFIG_URL="https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp-qmodem.config"
+          REAL_CONFIG_URL="https://raw.github.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp-qmodem.config"
           echo "当前下载链接：$REAL_CONFIG_URL"
           
           # 检测链接是否有效
           if ! curl -s --head "$REAL_CONFIG_URL" | grep "HTTP/1.1 200 OK" > /dev/null; then
-            echo "ERROR: 链接无效！请检查：https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp-qmodem.config"
+            echo "ERROR: 链接无效！请检查：https://raw.github.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp-qmodem.config"
             exit 1
           fi
           
