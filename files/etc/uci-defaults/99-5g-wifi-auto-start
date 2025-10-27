@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# 配置5G自动连接
+uci set network.wwan=interface
+uci set network.wwan.proto='qmi'
+uci set network.wwan.device='/dev/cdc-wdm0'
+uci set network.wwan.apn='default'
+uci set network.wwan.pincode='1234'  # 根据你的SIM卡修改
+uci set network.wwan.auth='none'
+uci set network.wwan.dhcp='auto'
+uci commit network
+
+# 配置WiFi热点
+uci set wireless.@wifi-device[0].disabled='0'
+uci set wireless.@wifi-iface[0].disabled='0'
+uci set wireless.@wifi-iface[0].mode='ap'
+uci set wireless.@wifi-iface[0].ssid='XGP-5G-Hotspot'
+uci set wireless.@wifi-iface[0].encryption='psk2'
+uci set wireless.@wifi-iface[0].key='12345678'
+uci set wireless.@wifi-iface[0].network='lan'
+uci commit wireless
+
+# 设置防火墙规则允许WWAN流量
+uci add firewall zone
+uci set firewall.@zone[-1].name='wwan'
+uci set firewall.@zone[-1].input='REJECT'
+uci set firewall.@zone[-1].output='ACCEPT'
+uci set firewall.@zone[-1].forward='REJECT'
+uci set firewall.@zone[-1].masq='1'
+uci set firewall.@zone[-1].mtu_fix='1'
+uci add_list firewall.@zone[-1].network='wwan'
+
+uci add firewall forwarding
+uci set firewall.@forwarding[-1].src='lan'
+uci set firewall.@forwarding[-1].dest='wwan'
+uci commit firewall
+
+# 启动相关服务
+/etc/init.d/network restart
+/etc/init.d/wireless restart
+/etc/init.d/firewall restart
