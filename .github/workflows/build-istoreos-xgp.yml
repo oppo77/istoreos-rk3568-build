@@ -18,7 +18,7 @@ jobs:
       FIRMWARE_DIST: istoreos
       # 【关键：替换为你的xgp-qmodem.config的实际raw链接】
       # 示例：CONFIG_URL="https://raw.githubusercontent.com/你的用户名/你的仓库名/main/xgp-qmodem.config"
-      CONFIG_URL: "https://raw.githubusercontent.com/你的用户名/你的仓库名/main/xgp-qmodem.config"
+      CONFIG_URL: "https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp-qmodem.config"
 
     steps:
       - name: 1. 拉取仓库代码（含files和config文件）
