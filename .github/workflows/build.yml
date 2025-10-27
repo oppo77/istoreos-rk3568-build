@@ -1,97 +1,152 @@
-name: Build iStoreOS for RK3568 (Fixed elftools)
+name: Build iStoreOS for RK3568 with 5G Modem Support
+
 on:
   push:
     branches: [ main ]
     paths:
       - '.config'
+      - 'files/**'
+      - '.github/workflows/**'
   workflow_dispatch:
+    inputs:
+      clean_build:
+        description: 'Clean build (remove previous build files)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  BUILD_DIR: istoreos-src
+  MAX_JOBS: 4  # 限制并行任务数防止内存溢出
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    
+    strategy:
+      matrix:
+        include:
+          - device: nlnet_xgp
+            target: rockchip/armv8
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-      - name: Install complete Python elftools environment
-        run: |
-          sudo apt update
-          
-          # 安装所有可能的Python elftools包
-          sudo apt install -y python3-pyelftools python3-elftools || true
-          
-          # 如果系统包不可用，使用pip安装
-          pip3 install pyelftools
-          pip3 install --upgrade pip
-          pip3 install setuptools wheel
-          
-          # 验证安装
-          python3 -c "import elftools; print('elftools导入成功')"
-          python3 -c "from elftools.elf.elffile import ELFFile; print('ELFFile导入成功')"
-          
-          # 检查Python路径
-          python3 -c "import site; print('Python路径:', site.getsitepackages())"
-          python3 -c "import elftools; print('elftools路径:', elftools.__file__)"
+    - name: Setup swap space (防止内存溢出)
+      run: |
+        sudo fallocate -l 4G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
 
-      - name: Install build dependencies
-        run: |
-          sudo apt install -y \
-            build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git \
-            libncurses5-dev libncursesw5-dev libssl-dev \
-            libelf-dev python3 python3-pip python3-dev \
-            rsync unzip zlib1g-dev file wget curl
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+          gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
+          python3-distutils rsync unzip zlib1g-dev file wget \
+          cmake pkg-config libtool automake autoconf \
+          subversion mercurial time
 
-      - name: Clone iStoreOS
-        run: |
-          git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=istoreos-24.10 istoreos-src
+    - name: Clone iStoreOS source
+      run: |
+        git clone https://github.com/istoreos/istoreos.git $BUILD_DIR --depth=1 --branch=istoreos-24.10
+        cd $BUILD_DIR
 
-      - name: Clone 5G-Modem-Support
-        run: |
-          git clone https://github.com/Siriling/5G-Modem-Support.git --depth=1 5G-Modem-Support
+    - name: Clone 5G-Modem-Support
+      run: |
+        cd $BUILD_DIR
+        git clone https://github.com/Siriling/5G-Modem-Support.git package/5g-modem-support
+        # 添加5G模块到feeds
+        echo "src-git modem_support https://github.com/Siriling/5G-Modem-Support.git" >> feeds.conf.default
 
-      - name: Setup Python environment for build
-        run: |
-          # 设置Python环境变量
-          export PYTHONPATH=/usr/lib/python3/dist-packages:/usr/local/lib/python3.10/dist-packages
-          echo "PYTHONPATH=$PYTHONPATH" >> $GITHUB_ENV
-          
-          # 验证编译环境能找到elftools
-          cd istoreos-src
-          python3 -c "import sys; sys.path.extend(['/usr/lib/python3/dist-packages', '/usr/local/lib/python3.10/dist-packages']); import elftools; print('编译环境elftools检查通过')"
+    - name: Clean previous build (可选)
+      if: inputs.clean_build == true
+      run: |
+        cd $BUILD_DIR
+        make clean
 
-      - name: Copy config and setup
-        run: |
-          cd istoreos-src
-          [ -f ../.config ] && cp ../.config .config || true
-          [ -d ../files ] && cp -r ../files . || true
+    - name: Load custom config
+      run: |
+        cp .config $BUILD_DIR/.config
 
-      - name: Test prerequisite check
-        run: |
-          cd istoreos-src
-          # 单独运行prereq检查，看具体错误
-          make prereq || {
-            echo "=== PREREQ检查失败详情 ==="
-            # 尝试获取更详细的错误信息
-            make V=s prereq 2>&1 | grep -A10 -B10 "elftools" || true
-            exit 1
-          }
+    - name: Copy custom files
+      run: |
+        cp -rf files/* $BUILD_DIR/files/ 2>/dev/null || true
 
-      - name: Update feeds
-        run: |
-          cd istoreos-src
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+    - name: Update and install feeds
+      run: |
+        cd $BUILD_DIR
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        # 特别安装5G相关包
+        ./scripts/feeds install quectel-cm-5g quectel_Gobinet quectel_MHI modemmanager
 
-      - name: Build firmware
-        run: |
-          cd istoreos-src
-          make defconfig
-          make download
-          make -j$(nproc) V=s
+    - name: Configure build
+      run: |
+        cd $BUILD_DIR
+        make defconfig
+        # 应用我们的自定义配置
+        scripts/diffconfig.sh > config_diff
+        cat config_diff
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware
-          path: istoreos-src/bin/targets/rockchip/armv8/*.img
+    - name: Download sources (限制内存使用)
+      run: |
+        cd $BUILD_DIR
+        # 限制并行下载和编译任务数
+        make -j2 download V=sc 2>&1 | head -1000
+        echo "Download completed"
+
+    - name: Build toolchain (分步构建减少内存压力)
+      run: |
+        cd $BUILD_DIR
+        make -j$MAX_JOBS toolchain/install V=s 2>&1 | tail -500
+
+    - name: Build kernel (分步构建)
+      run: |
+        cd $BUILD_DIR
+        make -j$MAX_JOBS target/compile V=s 2>&1 | tail -1000
+
+    - name: Build packages (分步构建)
+      run: |
+        cd $BUILD_DIR
+        make -j$MAX_JOBS package/compile V=s 2>&1 | tail -1500
+
+    - name: Build firmware image
+      run: |
+        cd $BUILD_DIR
+        make -j$MAX_JOBS V=s 2>&1 | tail -2000
+
+    - name: Check build artifacts
+      run: |
+        cd $BUILD_DIR
+        find bin/targets -name "*.img" -o -name "*.gz" | head -10
+        du -sh bin/targets/*
+
+    - name: Upload firmware artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: istoreos-rk3568-5g-firmware
+        path: ${{ env.BUILD_DIR }}/bin/targets/rockchip/armv8/*.img.gz
+        retention-days: 30
+
+    - name: Upload build logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: |
+          ${{ env.BUILD_DIR }}/logs/
+          ${{ env.BUILD_DIR }}/build.log
+        retention-days: 7
+
+    - name: Cleanup swap
+      if: always()
+      run: |
+        sudo swapoff /swapfile || true
+        sudo rm -f /swapfile || true
