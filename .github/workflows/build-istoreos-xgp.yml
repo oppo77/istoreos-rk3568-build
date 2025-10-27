@@ -6,7 +6,7 @@ on:
     branches: [ main ]
     paths:
       - '.github/workflows/build-istoreos-xgp.yml'
-      - 'xgp-5g.config'  # 配置文件路径修改为根目录
+      - 'configs/xgp-5g.config'  # 明确监控 configs 目录下的配置文件
 
 jobs:
   build:
@@ -14,10 +14,10 @@ jobs:
     timeout-minutes: 480
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Initialization environment
+      - name: Initialize environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -29,7 +29,6 @@ jobs:
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
           sudo timedatectl set-timezone "Asia/Shanghai"
-          echo "COMPILE_START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Clone iStoreOS source
         run: |
@@ -41,40 +40,52 @@ jobs:
       - name: Integrate 5G-Modem-Support
         run: |
           cd istoreos
-          # 移除可能存在的冲突驱动
+          # 移除冲突驱动
           rm -rf package/feeds/packages/quectel-MHI
           rm -rf package/feeds/packages/qmi-utils
           rm -rf package/feeds/packages/wwan
-          
-          # 克隆5G模块支持仓库
+          # 克隆5G支持仓库
           git clone --depth=1 https://github.com/Siriling/5G-Modem-Support.git package/5G-Modem-Support
-          
-          # 安装5G相关 feeds
           ./scripts/feeds install -a -p 5G-Modem-Support
 
-      - name: Load custom configuration (修正路径)
+      - name: Load custom config (带路径调试)
         run: |
+          # 调试：打印当前工作目录和仓库根目录
+          echo "当前工作目录: $(pwd)"
+          echo "仓库根目录: $GITHUB_WORKSPACE"
+          
+          # 调试：检查 configs 目录是否存在，以及目录下的文件
+          echo "检查 configs 目录是否存在..."
+          if [ -d "$GITHUB_WORKSPACE/configs" ]; then
+            echo "configs 目录存在，目录下的文件列表："
+            ls -la "$GITHUB_WORKSPACE/configs"
+          else
+            echo "错误：configs 目录不存在！"
+            exit 1
+          fi
+          
+          # 调试：检查目标配置文件是否存在
+          CONFIG_FILE="$GITHUB_WORKSPACE/configs/xgp-5g.config"
+          if [ -f "$CONFIG_FILE" ]; then
+            echo "配置文件存在：$CONFIG_FILE"
+          else
+            echo "错误：配置文件 $CONFIG_FILE 不存在！"
+            exit 1
+          fi
+          
+          # 复制配置文件到编译目录
           cd istoreos
-          # 调试：列出仓库根目录文件，确认配置文件存在
-          echo "仓库根目录文件列表："
-          ls -la $GITHUB_WORKSPACE
-          
-          # 复制配置文件（路径改为根目录的xgp-5g.config）
-          cp $GITHUB_WORKSPACE/xgp-5g.config .config
-          
-          # 确保配置生效
+          cp "$CONFIG_FILE" .config
           make defconfig
 
-      - name: Build firmware with log control
+      - name: Build firmware (控制日志大小)
         run: |
           cd istoreos
-          # 设置日志限制防止中断
           export BUILD_LOG=build.log
           (make -j$(nproc) V=s 2>&1 | tee $BUILD_LOG) || (tail -n 500 $BUILD_LOG && exit 1)
-          # 压缩日志
           gzip $BUILD_LOG
 
-      - name: Prepare output
+      - name: Collect output
         run: |
           mkdir -p output
           cp istoreos/bin/targets/*/*/*.img.gz output/
