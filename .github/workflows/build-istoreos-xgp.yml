@@ -21,28 +21,14 @@ jobs:
       - name: 1. 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 2. 更换源+强制安装所有依赖（重点修复squashfs-tools）
+      - name: 2. 安装系统依赖+Python模块（修复elftools缺失）
         run: |
-          # 更换阿里云源，确保squashfs-tools包可获取
+          # 更换阿里云源，确保包同步
           sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo apt clean && sudo apt update -y
 
-          # 单独强制安装squashfs-tools（核心修复）
-          echo "===== 优先安装squashfs-tools ====="
-          if ! sudo apt install -y squashfs-tools; then
-            echo "===== 第一次安装失败，重试 ====="
-            sudo apt install -y squashfs-tools  # 重试一次
-          fi
-
-          # 验证squashfs-tools是否安装成功
-          if ! command -v mksquashfs &> /dev/null; then
-            echo "ERROR: squashfs-tools 仍然未安装成功！请检查apt源是否包含该包"
-            exit 1
-          fi
-          echo "===== squashfs-tools 安装验证通过 ====="
-
-          # 安装其他必需依赖
+          # 安装系统依赖（含之前修复的squashfs-tools等）
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
@@ -50,10 +36,25 @@ jobs:
             python3-setuptools python3-yaml rsync subversion unzip wget \
             zlib1g-dev quilt libc6-dev-i386 u-boot-tools dosfstools mtools parted \
             dwarves bc liblz4-tool meson ninja-build cmake \
-            patchelf libseccomp-dev device-tree-compiler
+            squashfs-tools patchelf libseccomp-dev device-tree-compiler
+
+          # 关键：安装U-Boot所需的Python3 elftools模块（包名为pyelftools）
+          echo "安装Python3 elftools模块（pyelftools）..."
+          if ! python3 -m pip install pyelftools; then
+            echo "重试安装pyelftools..."
+            python3 -m pip install pyelftools --upgrade  # 强制升级安装
+          fi
+
+          # 验证elftools模块是否安装成功
+          echo "验证elftools模块..."
+          if ! python3 -c "import elftools" &> /dev/null; then
+            echo "ERROR: Python3 elftools模块（pyelftools）安装失败！"
+            exit 1
+          fi
+          echo "elftools模块验证通过"
 
           # 验证其他关键工具
-          REQUIRED_TOOLS="xz gcc g++ make python3 rsync wget unzip meson ninja cmake"
+          REQUIRED_TOOLS="xz gcc g++ make python3 rsync wget unzip mksquashfs"
           for tool in $REQUIRED_TOOLS; do
             if ! command -v $tool &> /dev/null; then
               echo "ERROR: 依赖 $tool 未安装！"
@@ -84,7 +85,7 @@ jobs:
           grep -q "CONFIG_TARGET_rockchip=y" .config || exit 1
           grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config || exit 1
 
-      - name: 6. 执行前置检查
+      - name: 6. 执行前置检查（验证U-Boot依赖）
         run: |
           cd $FIRMWARE_DIST
           make prereq V=99 2>&1 | tee prereq.log
