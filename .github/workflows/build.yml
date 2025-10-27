@@ -1,174 +1,97 @@
-name: Fast Build iStoreOS for RK3568
+name: Build iStoreOS for xgp (RK3568) with 5G-Modem-Support
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
     paths:
-      - '.config'
-      - 'files/**'
-  workflow_dispatch:
-    inputs:
-      clean_build:
-        description: 'Clean build'
-        required: false
-        default: false
-        type: boolean
-
-env:
-  BUILD_DIR: istoreos-src
+      - '.config'  # 仅修改.config时触发编译
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180  # 3小时超时
-    
+    env:
+      # 限制日志输出大小，防止中断（单个日志文件最大50MB，超过自动切割）
+      MAX_LOG_SIZE: "52428800"  # 50MB（字节）
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout local code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-    - name: Setup 4GB swap space (防止内存溢出)
-      run: |
-        echo "设置4GB交换空间..."
-        sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
-        sudo sysctl vm.swappiness=10  # 降低交换倾向，优先使用物理内存
-        echo "当前内存状态:"
-        free -h
-        echo "交换空间状态:"
-        swapon --show
+      - name: Install dependencies
+        run: |
+          # 安装编译依赖，增加日志切割工具logrotate
+          sudo apt update -y && sudo apt upgrade -y
+          sudo apt install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
+            python3-distutils rsync unzip zlib1g-dev file wget logrotate
+          # 配置logrotate限制编译日志大小
+          echo "/tmp/build-istoreos.log {
+            size ${MAX_LOG_SIZE}
+            rotate 5
+            compress
+            missingok
+            notifempty
+          }" | sudo tee /etc/logrotate.d/istoreos-build
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-          gettext git libncurses5-dev libssl-dev libelf-dev \
-          python3-distutils rsync unzip zlib1g-dev file wget
+      - name: Clone iStoreOS source
+        run: |
+          git clone https://github.com/istoreos/istoreos.git --depth=1 --branch=main istoreos-src
+          cd istoreos-src
+          # 克隆5G-Modem-Support仓库到package目录（替换原生5G驱动）
+          git clone https://github.com/Siriling/5G-Modem-Support.git \
+            package/5G-Modem-Support --depth=1
 
-    - name: Clone iStoreOS source
-      run: |
-        git clone https://github.com/istoreos/istoreos.git $BUILD_DIR --depth=1 --branch=istoreos-24.10
+      - name: Load custom config
+        run: |
+          # 复制自定义.config到源码目录（已替换5G驱动配置）
+          cp ./.config istoreos-src/.config
+          # 复制自定义files（如有），无则可删除此步骤
+          if [ -d "./files" ]; then
+            cp -r ./files istoreos-src/
+          fi
 
-    - name: Add 5G-Modem-Support
-      run: |
-        cd $BUILD_DIR
-        git clone https://github.com/Siriling/5G-Modem-Support.git package/5g-modem-support
+      - name: Update and install feeds
+        run: |
+          cd istoreos-src
+          # 更新feeds并安装所有包（含5G-Modem-Support）
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          # 确保5G-Modem-Support包被正确识别
+          echo "Checking 5G-Modem-Support package..."
+          if [ -d "package/5G-Modem-Support" ]; then
+            echo "5G-Modem-Support package loaded successfully"
+          else
+            echo "Error: 5G-Modem-Support package not found!" && exit 1
+          fi
 
-    - name: Clean previous build
-      if: inputs.clean_build == true
-      run: |
-        cd $BUILD_DIR
-        make clean
+      - name: Build firmware (with log limit)
+        run: |
+          cd istoreos-src
+          # 生成配置并编译，日志重定向到文件并通过logrotate限制大小
+          make -j$(nproc) defconfig 2>&1 | tee -a /tmp/build-istoreos.log
+          make -j$(nproc) download V=s 2>&1 | tee -a /tmp/build-istoreos.log
+          # 手动触发logrotate确保日志不超限
+          sudo logrotate -f /etc/logrotate.d/istoreos-build
+          make -j$(nproc) V=s 2>&1 | tee -a /tmp/build-istoreos.log
+          # 再次触发logrotate处理最终日志
+          sudo logrotate -f /etc/logrotate.d/istoreos-build
 
-    - name: Copy configuration and files
-      run: |
-        cp .config $BUILD_DIR/.config
-        mkdir -p $BUILD_DIR/files
-        cp -rf files/* $BUILD_DIR/files/ 2>/dev/null || echo "No custom files"
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: istoreos-xgp-rk3568-firmware
+          path: |
+            istoreos-src/bin/targets/rockchip/armv8/*.img
+            istoreos-src/bin/targets/rockchip/armv8/*.tar.gz
+          retention-days: 7  # 固件保留7天，可按需调整
 
-    - name: Update and install feeds (静默模式)
-      run: |
-        cd $BUILD_DIR
-        ./scripts/feeds update -a > /dev/null 2>&1
-        ./scripts/feeds install -a > /dev/null 2>&1
-
-    - name: Download sources
-      run: |
-        cd $BUILD_DIR
-        echo "开始下载源码包..."
-        make -j$(nproc) download V=0 2>&1 | grep -E "(ERROR|error|failed|Download)" || true
-        echo "下载完成"
-
-    - name: Build firmware (全速编译)
-      run: |
-        cd $BUILD_DIR
-        # 快速配置
-        make defconfig > /dev/null 2>&1
-        
-        echo "开始全速编译，CPU核心数: $(nproc)"
-        echo "编译开始时间: $(date)"
-        
-        # 使用所有核心编译，但限制日志输出
-        timeout 7200 make -j$(nproc) V=0 2>&1 | tail -200
-        
-        echo "编译结束时间: $(date)"
-        echo "编译完成"
-
-    - name: Clean build artifacts (智能清理)
-      run: |
-        cd $BUILD_DIR
-        echo "=== 开始清理临时文件 ==="
-        echo "清理前磁盘使用:"
-        df -h .
-        du -sh . 2>/dev/null || true
-        
-        # 清理编译中间文件但保留工具链
-        echo "清理对象文件..."
-        find build_dir -name "*.o" -delete 2>/dev/null || true
-        find build_dir -name "*.d" -delete 2>/dev/null || true
-        find build_dir -name ".*.cmd" -delete 2>/dev/null || true
-        
-        echo "清理临时目录..."
-        rm -rf tmp/* 2>/dev/null || true
-        rm -rf logs/* 2>/dev/null || true
-        
-        # 清理大型日志文件但保留必要信息
-        find . -name "*.log" -size +5M -delete 2>/dev/null || true
-        
-        echo "清理后磁盘使用:"
-        df -h .
-        echo "固件目录大小:"
-        du -sh bin/targets/ 2>/dev/null || true
-
-    - name: Check firmware artifacts
-      run: |
-        cd $BUILD_DIR
-        echo "=== 生成的固件文件 ==="
-        find bin/targets -name "*.img" -o -name "*.gz" -o -name "*.zip" 2>/dev/null | xargs ls -lh 2>/dev/null || echo "未找到固件文件"
-        
-        # 检查文件完整性
-        if find bin/targets -name "*.img.gz" 2>/dev/null | grep -q .; then
-            echo "固件生成成功"
-            du -sh bin/targets/rockchip/armv8/*.img.gz 2>/dev/null || true
-        else
-            echo "警告: 未找到固件文件"
-            # 列出bin目录内容以便调试
-            find bin/targets -type f 2>/dev/null | head -20 || true
-        fi
-
-    - name: Upload firmware
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: istoreos-rk3568-$(date +%Y%m%d-%H%M%S)
-        path: |
-          ${{ env.BUILD_DIR }}/bin/targets/rockchip/armv8/*.img.gz
-          ${{ env.BUILD_DIR }}/bin/targets/rockchip/armv8/*.zip
-        retention-days: 30
-        compression-level: 0  # 已经压缩过，不再重复压缩
-
-    - name: Upload build info
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-info-$(date +%Y%m%d-%H%M%S)
-        path: |
-          ${{ env.BUILD_DIR }}/.config
-          ${{ env.BUILD_DIR }}/feeds.conf.default
-        retention-days: 7
-
-    - name: Final cleanup
-      if: always()
-      run: |
-        echo "=== 最终清理 ==="
-        # 关闭交换空间
-        sudo swapoff /swapfile 2>/dev/null || true
-        sudo rm -f /swapfile 2>/dev/null || true
-        
-        # 显示最终磁盘状态
-        echo "最终磁盘状态:"
-        df -h
-        echo "内存状态:"
-        free -h
+      - name: Upload build log (for debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /tmp/build-istoreos.log*
+          retention-days: 3  # 日志保留3天
