@@ -1,4 +1,4 @@
-name: 本地编译iStoreOS-XGP（最终稳定版）
+name: 本地编译iStoreOS-XGP（镜像版）
 
 on:
   workflow_dispatch:
@@ -19,28 +19,37 @@ jobs:
       ISTOREOS_BRANCH: "istoreos-24.10"
       LOCAL_BUILD_DIR: "${{ github.workspace }}/build"
       VENV_PATH: "${LOCAL_BUILD_DIR}/python-venv"
+      # 核心：定义GitHub镜像地址
+      GITHUB_MIRROR: "https://bgithub.xyz"
 
     steps:
-      - name: 1. 拉取仓库代码
+      - name: 0. 配置GitHub镜像（全局替换）
+        run: |
+          # 1. 配置git全局镜像：将github.com替换为bgithub.xyz
+          git config --global url."${{ env.GITHUB_MIRROR }}/".insteadOf "https://github.com/"
+          # 2. 验证配置是否生效
+          echo "当前git全局镜像配置："
+          git config --global --get-regexp url.*.insteadOf
+
+      - name: 1. 拉取仓库代码（通过镜像）
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          # 可选：若仓库也在镜像站，可指定镜像地址（此处默认使用步骤0的全局配置）
+          # repository: ${{ env.GITHUB_MIRROR }}/oppo77/istoreos-rk3568-build
 
-      - name: 2. 系统依赖+Python虚拟环境配置（修正依赖列表）
+      - name: 2. 系统依赖+Python虚拟环境配置
         run: |
           echo "===== 安装系统基础依赖 ====="
-          # 修复：依赖列表仅保留包名，注释用#分隔，避免混入无效文本
           REQUIRED_PACKAGES="build-essential flex bison g++ gawk gcc-multilib \
-            gettext git \
-            libncurses5-dev libssl-dev libelf-dev python3 python3-pip \
+            gettext git libncurses5-dev libssl-dev libelf-dev python3 python3-pip \
             python3-venv rsync unzip wget zlib1g-dev quilt u-boot-tools squashfs-tools \
             meson ninja-build cmake device-tree-compiler liblz4-tool"
 
-          # 安装缺失的依赖
           for pkg in $REQUIRED_PACKAGES; do
             if ! dpkg -l | grep -q "$pkg"; then
               echo "安装缺失依赖：$pkg"
-              sudo apt update -y || sudo apt update -y  # 重试更新
+              sudo apt update -y || sudo apt update -y
               sudo apt install -y "$pkg" || {
                 echo "ERROR: 安装 $pkg 失败！"
                 exit 1
@@ -48,13 +57,12 @@ jobs:
             fi
           done
 
-          # 验证git是否安装成功
           echo "===== 验证git是否可用 ====="
           if ! command -v git &> /dev/null; then
             echo "ERROR: git 未安装成功！手动重试安装..."
             sudo apt install -y git --reinstall
             if ! command -v git &> /dev/null; then
-              echo "ERROR: git 始终安装失败，请手动检查系统包管理器！"
+              echo "ERROR: git 始终安装失败，请手动检查！"
               exit 1
             fi
           fi
@@ -99,35 +107,54 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-istoreos-${{ env.ISTOREOS_BRANCH }}-
 
-      - name: 4. 克隆/更新iStoreOS稳定分支
+      - name: 4. 克隆/更新iStoreOS稳定分支（使用bgithub.xyz镜像）
         run: |
           mkdir -p ${{ env.LOCAL_BUILD_DIR }}
           cd ${{ env.LOCAL_BUILD_DIR }}
 
+          # 克隆iStoreOS源码（直接使用镜像地址）
           if [ ! -d "${{ env.FIRMWARE_DIST }}" ]; then
-            git clone https://github.com/istoreos/istoreos.git ${{ env.FIRMWARE_DIST }} || {
-              echo "ERROR: git克隆失败，请检查网络或git安装！"
+            echo "从镜像克隆iStoreOS源码：${{ env.GITHUB_MIRROR }}/istoreos/istoreos.git"
+            git clone "${{ env.GITHUB_MIRROR }}/istoreos/istoreos.git" ${{ env.FIRMWARE_DIST }} || {
+              echo "ERROR: 镜像克隆失败！检查镜像地址是否可用：${{ env.GITHUB_MIRROR }}"
               exit 1
             }
           fi
+
+          # 进入源码目录，设置远程仓库为镜像（确保后续git pull正常）
           cd ${{ env.FIRMWARE_DIST }}
+          git remote set-url origin "${{ env.GITHUB_MIRROR }}/istoreos/istoreos.git"
+          # 切换到稳定分支并拉取最新代码
           git checkout ${{ env.ISTOREOS_BRANCH }}
-          git pull
+          git pull || {
+            echo "ERROR: git pull失败，可能镜像未同步该分支！"
+            exit 1
+          }
 
           echo "当前分支：$(git branch --show-current)"
           echo "最新Commit：$(git rev-parse --short HEAD)"
 
-      - name: 5. 同步软件源
+      - name: 5. 同步软件源（QModem使用bgithub.xyz镜像）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
+
+          # 1. 替换iStoreOS默认源为国内源（中科大）
           sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#g' feeds.conf.default
           sed -i 's#https://mirrors.cernet.edu.cn#https://mirrors.ustc.edu.cn#g' feeds.conf.default
 
-          if ! grep -q "qmodem" feeds.conf.default; then
-            echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
-          fi
+          # 2. 添加/替换QModem源为bgithub.xyz镜像
+          echo "使用QModem镜像源：${{ env.GITHUB_MIRROR }}/FUjr/QModem.git"
+          # 先删除原有QModem源（避免重复）
+          sed -i '/qmodem/d' feeds.conf.default
+          # 新增镜像源
+          echo "src-git qmodem ${{ env.GITHUB_MIRROR }}/FUjr/QModem.git" >> feeds.conf.default
 
-          ./scripts/feeds update -a
+          # 3. 同步软件源（通过镜像）
+          echo "同步软件源（含QModem镜像）..."
+          ./scripts/feeds update -a || {
+            echo "ERROR: 同步源失败！检查镜像地址或网络..."
+            exit 1
+          }
           ./scripts/feeds install -a -f
 
       - name: 6. 导入设备配置文件
@@ -195,9 +222,9 @@ jobs:
           echo "本地产物路径：$LOCAL_OUTPUT"
           ls -l $LOCAL_OUTPUT
 
-      - name: 9. 上传产物到GitHub
+      - name: 9. 上传产物到GitHub（可选，若镜像支持可替换）
         uses: actions/upload-artifact@v4
         with:
-          name: istoreos-local-final
+          name: istoreos-local-mirror
           path: ${{ env.LOCAL_BUILD_DIR }}/output/
           retention-days: 30
