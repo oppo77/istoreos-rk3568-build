@@ -21,14 +21,28 @@ jobs:
       - name: 1. 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 2. 更换源+安装基础依赖
+      - name: 2. 更换源+强制安装所有依赖（重点修复squashfs-tools）
         run: |
-          # 更换阿里云源，确保包完整性
+          # 更换阿里云源，确保squashfs-tools包可获取
           sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo apt clean && sudo apt update -y
 
-          # 安装已知的核心依赖（覆盖基础和最新版需求）
+          # 单独强制安装squashfs-tools（核心修复）
+          echo "===== 优先安装squashfs-tools ====="
+          if ! sudo apt install -y squashfs-tools; then
+            echo "===== 第一次安装失败，重试 ====="
+            sudo apt install -y squashfs-tools  # 重试一次
+          fi
+
+          # 验证squashfs-tools是否安装成功
+          if ! command -v mksquashfs &> /dev/null; then
+            echo "ERROR: squashfs-tools 仍然未安装成功！请检查apt源是否包含该包"
+            exit 1
+          fi
+          echo "===== squashfs-tools 安装验证通过 ====="
+
+          # 安装其他必需依赖
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
@@ -36,8 +50,16 @@ jobs:
             python3-setuptools python3-yaml rsync subversion unzip wget \
             zlib1g-dev quilt libc6-dev-i386 u-boot-tools dosfstools mtools parted \
             dwarves bc liblz4-tool meson ninja-build cmake \
-            # 新增：针对最新版固件打包和驱动编译的依赖
-            squashfs-tools patchelf libseccomp-dev device-tree-compiler
+            patchelf libseccomp-dev device-tree-compiler
+
+          # 验证其他关键工具
+          REQUIRED_TOOLS="xz gcc g++ make python3 rsync wget unzip meson ninja cmake"
+          for tool in $REQUIRED_TOOLS; do
+            if ! command -v $tool &> /dev/null; then
+              echo "ERROR: 依赖 $tool 未安装！"
+              exit 1
+            fi
+          done
 
       - name: 3. 克隆iStoreOS最新源码
         run: |
@@ -62,28 +84,10 @@ jobs:
           grep -q "CONFIG_TARGET_rockchip=y" .config || exit 1
           grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config || exit 1
 
-      - name: 6. 动态检测并补充缺失依赖（核心修复）
+      - name: 6. 执行前置检查
         run: |
           cd $FIRMWARE_DIST
-          # 第一次执行prereq检查，捕获缺失的工具
-          if ! make prereq V=99 2>&1 | tee prereq.log; then
-            echo "检测到缺失依赖，尝试自动补充..."
-            # 从日志中提取"missing"的工具（如"missing: abc" → 提取abc）
-            MISSING_TOOLS=$(grep "missing" prereq.log | awk '{print $2}' | sort | uniq)
-            if [ -n "$MISSING_TOOLS" ]; then
-              echo "需要补充的依赖：$MISSING_TOOLS"
-              # 自动安装缺失的工具（假设包名与工具名一致，特殊情况手动处理）
-              sudo apt install -y $MISSING_TOOLS
-              # 安装后重试prereq检查
-              if ! make prereq V=99; then
-                echo "ERROR: 补充依赖后仍失败，请手动检查prereq.log"
-                exit 1
-              fi
-            else
-              echo "ERROR: 未识别到具体缺失的依赖，请查看prereq.log"
-              exit 1
-            fi
-          fi
+          make prereq V=99 2>&1 | tee prereq.log
 
       - name: 7. 编译固件
         run: |
@@ -95,7 +99,7 @@ jobs:
             exit 1
           }
 
-      - name: 8. 打包产物（含调试日志）
+      - name: 8. 打包产物
         run: |
           cd $FIRMWARE_DIST
           mkdir -p output
@@ -103,7 +107,7 @@ jobs:
           cp $FIRMWARE_DIR/*.factory.img output/ 2>/dev/null
           cp .config output/final_config.config
           cp build.log output/build_log.txt
-          cp prereq.log output/prereq_check.log  # 保存依赖检查日志
+          cp prereq.log output/prereq_check.log
 
       - name: 9. 上传产物
         uses: actions/upload-artifact@v4
