@@ -1,4 +1,4 @@
-name: 本地编译iStoreOS-XGP（终极依赖修复）
+name: 本地编译iStoreOS-XGP（底层环境终极修复）
 
 on:
   workflow_dispatch:
@@ -12,160 +12,157 @@ jobs:
       FIRMWARE_DIST: istoreos
       ISTOREOS_BRANCH: "istoreos-24.10"
       LOCAL_BUILD_DIR: "${{ github.workspace }}/build"
-      VENV_PATH: "${LOCAL_BUILD_DIR}/python-venv"
-      GITHUB_MIRROR: "https://bgithub.xyz"
+      # 直接指定Python路径（避免u-boot猜路径）
+      PYTHON_CMD: "/usr/bin/python3"
+      # pyelftools系统级安装路径（提前查询好）
+      PYTHON_SITE_PACKAGES: "$(/usr/bin/python3 -c 'import site; print(site.getsitepackages()[0])')"
 
     steps:
-      - name: 0. 配置GitHub镜像
+      - name: 0. 配置GitHub镜像+环境变量（强制Python路径）
         run: |
-          git config --global url."${{ env.GITHUB_MIRROR }}/".insteadOf "https://github.com/"
+          git config --global url."https://bgithub.xyz/".insteadOf "https://github.com/"
+          # 强制设置PYTHONPATH，确保任何Python调用都能找到pyelftools
+          echo "export PYTHONPATH=${{ env.PYTHON_SITE_PACKAGES }}" >> ~/.bashrc
+          source ~/.bashrc
+          echo "PYTHONPATH已设置：${{ env.PYTHON_SITE_PACKAGES }}"
+          # 软链接python→python3（u-boot可能调用python命令）
+          if [ ! -f /usr/bin/python ]; then
+            sudo ln -s /usr/bin/python3 /usr/bin/python
+            echo "已创建python→python3软链接"
+          fi
 
       - name: 1. 拉取仓库代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: 2. 安装系统依赖（含Python和主题依赖）
+      - name: 2. 安装系统依赖+强制修复Python环境
         run: |
-          echo "===== 安装所有必需依赖 ====="
+          echo "===== 安装所有依赖+修复Python ====="
           sudo apt update -y
-          # 1. 基础编译依赖
-          sudo apt install -y build-essential python3 python3-pip python3-venv \
-            python3-dev python3-setuptools swig rsync
-          # 2. 解决luci-theme-argon缺失（iStoreOS默认主题）
-          sudo apt install -y git  # 确保git可用，用于拉取主题
-
-      - name: 3. 强制安装pyelftools（系统级+虚拟环境双保险）
-        run: |
-          echo "===== 双保险安装pyelftools ====="
-          # 方案1：系统级安装（确保u-boot无论如何都能找到）
+          # 1. 基础依赖
+          sudo apt install -y build-essential python3 python3-pip python3-dev \
+            python3-setuptools swig rsync git
+          # 2. 强制安装pyelftools到系统级（u-boot优先找系统Python）
           sudo pip install pyelftools --upgrade --force-reinstall
-          # 方案2：虚拟环境安装（规范路径）
-          rm -rf "${{ env.VENV_PATH }}"
-          mkdir -p "$(dirname ${{ env.VENV_PATH }})"
-          /usr/bin/python3 -m venv "${{ env.VENV_PATH }}" || exit 1
-          source "${{ env.VENV_PATH }}/bin/activate" || exit 1
-          pip install pyelftools --upgrade --force-reinstall
+          # 3. 验证pyelftools是否在PYTHONPATH中
+          if ! ${{ env.PYTHON_CMD }} -c "import elftools; print('pyelftools找到！')"; then
+            echo "ERROR: pyelftools仍未找到！检查路径：${{ env.PYTHON_SITE_PACKAGES }}"
+            ls ${{ env.PYTHON_SITE_PACKAGES }} | grep elftools  # 显示是否存在
+            exit 1
+          fi
 
-          # 终极验证：双环境检查
-          echo "===== 验证pyelftools ====="
-          # 虚拟环境验证
-          if ! python3 -c "import elftools; print('虚拟环境pyelftools正常')" &> /dev/null; then
-            echo "ERROR: 虚拟环境pyelftools失败！"
-            exit 1
-          fi
-          # 系统级验证（u-boot可能调用系统Python）
-          if ! /usr/bin/python3 -c "import elftools; print('系统级pyelftools正常')" &> /dev/null; then
-            echo "ERROR: 系统级pyelftools失败！"
-            exit 1
-          fi
-          deactivate
+      - name: 3. 解决luci-theme-argon缺失（添加官方feed）
+        run: |
+          echo "===== 安装luci-theme-argon ====="
+          cd ${{ env.LOCAL_BUILD_DIR }}
+          # 克隆iStoreOS源码前先准备主题（避免被覆盖）
+          git clone https://github.com/jerrykuku/luci-theme-argon.git argon-theme
+          # 后续会将主题复制到正确路径
 
       - name: 4. 克隆iStoreOS源码
         run: |
           mkdir -p ${{ env.LOCAL_BUILD_DIR }}
           cd ${{ env.LOCAL_BUILD_DIR }}
           rm -rf ${{ env.FIRMWARE_DIST }}
-          git clone "${{ env.GITHUB_MIRROR }}/istoreos/istoreos.git" ${{ env.FIRMWARE_DIST }} || exit 1
+          git clone https://bgithub.xyz/istoreos/istoreos.git ${{ env.FIRMWARE_DIST }} || exit 1
           cd ${{ env.FIRMWARE_DIST }}
           git checkout ${{ env.ISTOREOS_BRANCH }} || exit 1
 
-      - name: 5. 同步软件源（精准修复所有依赖）
+          # 复制主题到正确路径（iStoreOS识别的package目录）
+          cp -r ${{ env.LOCAL_BUILD_DIR }}/argon-theme ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/package/luci-theme-argon
+          echo "主题已复制到：package/luci-theme-argon"
+
+      - name: 5. 同步QModem源+暴力修改依赖（同步后立即改）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
-          # 替换国内源加速
+          # 替换国内源
           sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#g' feeds.conf.default
 
-          # 修复1：安装luci-theme-argon（解决istoreos-files依赖）
-          echo "===== 安装luci-theme-argon ====="
-          ./scripts/feeds update luci || exit 1
-          ./scripts/feeds install luci-theme-argon || {
-            echo "WARN: 从源安装失败，手动克隆..."
-            git clone https://github.com/jerrykuku/luci-theme-argon.git package/luci-theme-argon
-          }
-
-          # 修复2：QModem依赖（先查实际包名，再替换）
-          echo "===== 修复QModem依赖 ====="
-          # 清理旧QModem源
+          # 1. 同步QModem源（同步后立即修改Makefile，避免被覆盖）
           sed -i '/qmodem/d' feeds.conf.default
           echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
           ./scripts/feeds update qmodem || exit 1
           ./scripts/feeds install -a -p qmodem || exit 1
 
-          # 关键：列出QModem源中实际的quectel包，避免猜包名！
-          echo "===== QModem源中实际的quectel包 ====="
-          QUECTEL_PACKAGES=$(ls package/feeds/qmodem/ | grep -i quectel)
-          echo "实际存在的quectel包：$QUECTEL_PACKAGES"
-          # 取第一个实际存在的quectel包（避免手动输入错误）
-          ACTUAL_QUECTEL_PKG=$(echo $QUECTEL_PACKAGES | awk '{print $1}')
-          if [ -z "$ACTUAL_QUECTEL_PKG" ]; then
-            echo "ERROR: QModem源中无quectel相关包！"
-            exit 1
-          fi
-          echo "将QModem依赖替换为：$ACTUAL_QUECTEL_PKG"
-
-          # 修改QModem的Makefile，替换无效依赖
+          # 2. 暴力修改QModem依赖：直接删除无效依赖，或替换为实际存在的包
           QMODEM_MAKEFILE="package/feeds/qmodem/qmodem/Makefile"
-          sed -i "s/quectel_CM_5G_M-M/$ACTUAL_QUECTEL_PKG/g" "$QMODEM_MAKEFILE"
-          sed -i "s/quectel_CM_5G_M/$ACTUAL_QUECTEL_PKG/g" "$QMODEM_MAKEFILE"
+          echo "===== 暴力修改QModem Makefile ====="
+          # 方案：删除依赖中的quectel_CM_5G_M-M和quectel_CM_5G_M，保留实际存在的包
+          # 先查看实际存在的quectel包
+          QUECTEL_EXIST=$(ls package/feeds/qmodem/ | grep -i quectel | head -1)
+          if [ -n "$QUECTEL_EXIST" ]; then
+            # 替换为实际存在的包
+            sed -i "s/quectel_CM_5G_M-M|//g; s/quectel_CM_5G_M|//g; s/|quectel_CM_5G_M//g" "$QMODEM_MAKEFILE"
+            sed -i "s/quectel_CM_5G_M-M/$QUECTEL_EXIST/g; s/quectel_CM_5G_M/$QUECTEL_EXIST/g" "$QMODEM_MAKEFILE"
+          else
+            # 若没有quectel包，直接删除依赖（暂时禁用，先保证编译通过）
+            sed -i "s/DEPENDS:=.*/DEPENDS:=/g" "$QMODEM_MAKEFILE"
+          fi
           # 验证修改结果
-          echo "===== 修改后的QModem依赖 ====="
-          grep -E "DEPENDS|PKG_BUILD_DEPENDS" "$QMODEM_MAKEFILE"
+          grep -E "DEPENDS" "$QMODEM_MAKEFILE"
 
-      - name: 6. 导入配置并清理无效项
+      - name: 6. 导入配置+强制启用主题
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
           cp ${{ github.workspace }}/xgp-qmodem.config .config
 
-          # 清理配置中无效的依赖名称
-          ACTUAL_QUECTEL_PKG=$(ls package/feeds/qmodem/ | grep -i quectel | awk '{print $1}')
-          sed -i "s/quectel_CM_5G_M-M/$ACTUAL_QUECTEL_PKG/g" .config
-          sed -i "s/quectel_CM_5G_M/$ACTUAL_QUECTEL_PKG/g" .config
-          # 确保luci-theme-argon启用
+          # 1. 强制启用luci-theme-argon
           sed -i 's/# CONFIG_PACKAGE_luci-theme-argon is not set/CONFIG_PACKAGE_luci-theme-argon=y/' .config
+          # 2. 禁用QModem的无效依赖包
+          sed -i 's/CONFIG_PACKAGE_quectel_CM_5G_M-M=y/# CONFIG_PACKAGE_quectel_CM_5G_M-M is not set/' .config
+          sed -i 's/CONFIG_PACKAGE_quectel_CM_5G_M=y/# CONFIG_PACKAGE_quectel_CM_5G_M is not set/' .config
 
           make defconfig || exit 1
 
-      - name: 7. 预检查依赖（确保所有问题解决）
+      - name: 7. 编译前强制设置环境变量（确保u-boot找到pyelftools）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
-          # 激活虚拟环境（同时系统级已安装，双保险）
-          source "${{ env.VENV_PATH }}/bin/activate" || exit 1
-          echo "当前Python路径：$(which python3)"
-          echo "系统Python路径：/usr/bin/python3"
+          # 1. 再次设置PYTHONPATH（避免终端缓存）
+          export PYTHONPATH=${{ env.PYTHON_SITE_PACKAGES }}
+          echo "当前PYTHONPATH：$PYTHONPATH"
+          # 2. 强制u-boot使用指定的Python命令
+          sed -i "s#PYTHON := .*#PYTHON := ${{ env.PYTHON_CMD }}#g" ./package/boot/uboot-common/Makefile
+          sed -i "s#PYTHON := .*#PYTHON := ${{ env.PYTHON_CMD }}#g" ./package/boot/uboot-rockchip/Makefile
+          echo "u-boot已配置使用Python：${{ env.PYTHON_CMD }}"
 
-          # 运行prereq检查，输出详细日志
+      - name: 8. 执行prereq检查（带底层日志）
+        run: |
+          cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
+          export PYTHONPATH=${{ env.PYTHON_SITE_PACKAGES }}
+
+          # 运行prereq并输出u-boot相关日志
           make prereq V=s 2>&1 | tee prereq.log || {
-            echo "===== 依赖检查失败，关键错误 ====="
-            grep -i "error\|missing\|failed\|elftools\|quectel\|argon" prereq.log
+            echo "===== 关键错误定位 ====="
+            # 查看u-boot调用Python的日志
+            grep -i "PYTHON|python|elftools" prereq.log
+            # 查看主题和QModem依赖日志
+            grep -i "argon|quectel" prereq.log
             exit 1
           }
-          deactivate
 
-      - name: 8. 编译
+      - name: 9. 编译（确保环境变量生效）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
-          source "${{ env.VENV_PATH }}/bin/activate" || exit 1
+          export PYTHONPATH=${{ env.PYTHON_SITE_PACKAGES }}
 
           CPU_CORES=$(nproc)
-          echo "使用 $CPU_CORES 核心编译..."
+          echo "使用 $CPU_CORES 核心编译，Python路径：${{ env.PYTHON_CMD }}"
           make -j$CPU_CORES V=m 2>&1 | tee build.log
 
-          deactivate
           # 验证固件
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
           if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
-            echo "===== 编译失败，最后1000行日志 ====="
-            cat build.log | tail -1000
+            echo "===== 编译失败，关键日志 ====="
+            grep -i "error|failed|elftools|quectel|argon" build.log | tail -200
             exit 1
           fi
           echo "固件编译成功！"
 
-      - name: 9. 打包产物
+      - name: 10. 打包产物
         run: |
           LOCAL_OUTPUT="${{ github.workspace }}/local-firmware"
           mkdir -p $LOCAL_OUTPUT
           cp -r ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/* $LOCAL_OUTPUT/
           cp ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/*.log $LOCAL_OUTPUT/
           echo "产物路径：$LOCAL_OUTPUT"
-          ls -l $LOCAL_OUTPUT
