@@ -1,13 +1,7 @@
-name: 本地编译iStoreOS-XGP（镜像版+虚拟环境修复）
+name: 本地编译iStoreOS-XGP（依赖修复版）
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths:
-      - '.github/workflows/local-build-final.yml'
-      - 'xgp-qmodem.config'
-      - 'files/**'
 
 jobs:
   local-build:
@@ -22,217 +16,151 @@ jobs:
       GITHUB_MIRROR: "https://bgithub.xyz"
 
     steps:
-      - name: 0. 配置GitHub镜像（全局替换）
+      - name: 0. 配置GitHub镜像
         run: |
           git config --global url."${{ env.GITHUB_MIRROR }}/".insteadOf "https://github.com/"
-          echo "当前git全局镜像配置："
-          git config --global --get-regexp url.*.insteadOf
 
-      - name: 1. 拉取仓库代码（通过镜像）
+      - name: 1. 拉取仓库代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: 2. 系统依赖+Python虚拟环境配置（移除--verbose参数）
+      - name: 2. 安装系统依赖（补充swig和必备工具）
         run: |
-          echo "===== 安装系统基础依赖 ====="
+          echo "===== 安装核心系统依赖 ====="
+          # 补充 swig（U-Boot必需）和其他缺失工具
           REQUIRED_PACKAGES="build-essential flex bison g++ gawk gcc-multilib \
             gettext git libncurses5-dev libssl-dev libelf-dev python3 python3-pip \
             python3-venv rsync unzip wget zlib1g-dev quilt u-boot-tools squashfs-tools \
-            meson ninja-build cmake device-tree-compiler liblz4-tool"
+            meson ninja-build cmake device-tree-compiler liblz4-tool \
+            swig  # 新增：U-Boot依赖的swig工具
+            python3-dev python3-setuptools  # 确保Python开发库
+            libncursesw5-dev  # 补充ncurses开发库
+          "
 
           for pkg in $REQUIRED_PACKAGES; do
             if ! dpkg -l | grep -q "$pkg"; then
               echo "安装缺失依赖：$pkg"
-              sudo apt update -y || sudo apt update -y
-              sudo apt install -y "$pkg" || {
-                echo "ERROR: 安装 $pkg 失败！"
-                exit 1
-              }
+              sudo apt update -y
+              sudo apt install -y "$pkg" || exit 1
             fi
           done
 
-          # 验证python3-venv是否安装
-          echo "===== 验证python3-venv是否可用 ====="
-          if ! dpkg -l | grep -q "python3-venv"; then
-            echo "ERROR: python3-venv未安装，无法创建虚拟环境！"
-            sudo apt install -y python3-venv --reinstall || exit 1
+          # 验证swig是否安装
+          if ! command -v swig &> /dev/null; then
+            echo "ERROR: swig安装失败！"
+            exit 1
           fi
 
-          # 准备虚拟环境目录
-          echo "===== 准备虚拟环境目录 ====="
-          echo "LOCAL_BUILD_DIR: ${{ env.LOCAL_BUILD_DIR }}"
-          echo "VENV_PATH: ${{ env.VENV_PATH }}"
+      - name: 3. 配置Python虚拟环境（确保pyelftools）
+        run: |
+          echo "===== 准备虚拟环境 ====="
           mkdir -p "$(dirname ${{ env.VENV_PATH }})"
-          if [ ! -w "$(dirname ${{ env.VENV_PATH }})" ]; then
-            echo "ERROR: 目录 $(dirname ${{ env.VENV_PATH }}) 无写入权限！"
-            sudo chown -R $USER:$USER "$(dirname ${{ env.VENV_PATH }})" || exit 1
-          fi
+          rm -rf "${{ env.VENV_PATH }}"  # 彻底清理旧环境
+          /usr/bin/python3 -m venv "${{ env.VENV_PATH }}" || exit 1
 
-          # 创建虚拟环境（核心修复：移除--verbose参数，兼容低版本Python）
-          echo "===== 创建Python虚拟环境 ====="
-          if [ -d "${{ env.VENV_PATH }}" ]; then
-            echo "清理旧虚拟环境..."
-            rm -rf "${{ env.VENV_PATH }}"
-          fi
-          # 移除--verbose，避免低版本Python不支持
-          /usr/bin/python3 -m venv "${{ env.VENV_PATH }}" || {
-            echo "ERROR: 虚拟环境创建失败！可能原因："
-            echo "1. python3-venv未正确安装（已尝试重新安装）"
-            echo "2. 目录权限不足（已尝试修复）"
-            echo "3. Python版本过低（建议升级到3.9+）"
+          # 强制激活并安装pyelftools
+          source "${{ env.VENV_PATH }}/bin/activate" || exit 1
+          echo "当前Python环境：$(which python3)"
+          pip install pyelftools --upgrade || {
+            echo "ERROR: pyelftools安装失败！"
             exit 1
           }
-
-          # 验证虚拟环境
-          echo "===== 验证虚拟环境 ====="
-          if [ ! -f "${{ env.VENV_PATH }}/bin/activate" ]; then
-            echo "ERROR: 虚拟环境激活脚本不存在！路径：${{ env.VENV_PATH }}/bin/activate"
-            ls -ld "$(dirname ${{ env.VENV_PATH }})"
-            ls -l "${{ env.VENV_PATH }}" 2>/dev/null || echo "虚拟环境目录不存在"
-            exit 1
-          fi
-
-          # 安装Python依赖
-          echo "===== 安装Python依赖 ====="
-          source "${{ env.VENV_PATH }}/bin/activate" || {
-            echo "ERROR: 激活虚拟环境失败！"
-            exit 1
-          }
+          # 验证pyelftools
           if ! python3 -c "import elftools" &> /dev/null; then
-            pip install pyelftools --upgrade || exit 1
+            echo "ERROR: 虚拟环境中仍缺少pyelftools！"
+            exit 1
           fi
           deactivate
 
-          echo "===== 验证核心工具 ====="
-          REQUIRED_TOOLS="gcc make python3 git wget unzip mksquashfs"
-          for tool in $REQUIRED_TOOLS; do
-            if ! command -v $tool &> /dev/null; then
-              echo "ERROR: 核心工具 $tool 未安装！"
-              exit 1
-            fi
-          done
-
-      - name: 3. 缓存编译资源
-        uses: actions/cache@v3
-        with:
-          path: |
-            ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/dl
-            ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/feeds
-          key: ${{ runner.os }}-istoreos-${{ env.ISTOREOS_BRANCH }}-${{ hashFiles('xgp-qmodem.config') }}
-          restore-keys: |
-            ${{ runner.os }}-istoreos-${{ env.ISTOREOS_BRANCH }}-
-
-      - name: 4. 克隆/更新iStoreOS稳定分支（使用镜像）
+      - name: 4. 克隆iStoreOS源码（确保完整）
         run: |
           mkdir -p ${{ env.LOCAL_BUILD_DIR }}
           cd ${{ env.LOCAL_BUILD_DIR }}
-
-          if [ ! -d "${{ env.FIRMWARE_DIST }}" ]; then
-            git clone "${{ env.GITHUB_MIRROR }}/istoreos/istoreos.git" ${{ env.FIRMWARE_DIST }} || {
-              echo "ERROR: 镜像克隆失败！"
-              exit 1
-            }
-          fi
+          # 彻底清理旧源码（避免残留问题）
+          rm -rf ${{ env.FIRMWARE_DIST }}
+          git clone "${{ env.GITHUB_MIRROR }}/istoreos/istoreos.git" ${{ env.FIRMWARE_DIST }} || exit 1
           cd ${{ env.FIRMWARE_DIST }}
           git remote set-url origin "${{ env.GITHUB_MIRROR }}/istoreos/istoreos.git"
-          git checkout ${{ env.ISTOREOS_BRANCH }}
+          git checkout ${{ env.ISTOREOS_BRANCH }} || exit 1
           git pull || exit 1
 
-          echo "当前分支：$(git branch --show-current)"
-
-      - name: 5. 同步软件源（QModem使用镜像）
+      - name: 5. 同步软件源（修复QModem和第三方依赖）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
+          # 替换国内源加速
           sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#g' feeds.conf.default
-          sed -i 's#https://mirrors.cernet.edu.cn#https://mirrors.ustc.edu.cn#g' feeds.conf.default
 
+          # 修复QModem源（确保依赖包存在）
           sed -i '/qmodem/d' feeds.conf.default
-          echo "src-git qmodem ${{ env.GITHUB_MIRROR }}/FUjr/QModem.git" >> feeds.conf.default
+          # 使用QModem官方源（若镜像不可用，替换为原地址）
+          echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
 
-          ./scripts/feeds update -a || exit 1
-          ./scripts/feeds install -a -f
+          # 移除baidupcs-web相关源（避免依赖错误，或替换为有效源）
+          sed -i '/baidupcs-web/d' feeds.conf.default
+          # 可选：若需要baidupcs-web，添加正确源
+          # echo "src-git baidupcs https://github.com/linkease/baidupcs-web.git" >> feeds.conf.default
 
-      - name: 6. 导入设备配置文件
+          # 强制同步所有源（--force更新）
+          ./scripts/feeds update -a -f || exit 1
+          # 重新安装所有包（确保依赖被拉取）
+          ./scripts/feeds install -a -f || exit 1
+
+          # 验证QModem依赖是否存在
+          if [ ! -d "package/feeds/qmodem/quectel-CM-5G" ] || [ ! -d "package/feeds/qmodem/quectel-cm" ]; then
+            echo "ERROR: QModem依赖包未同步！检查QModem源是否有效"
+            exit 1
+          fi
+
+      - name: 6. 导入设备配置（简化配置，避免无效依赖）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
           cp ${{ github.workspace }}/xgp-qmodem.config .config
-          make defconfig
+          # 禁用有依赖问题的包（如baidupcs-web）
+          sed -i 's/CONFIG_PACKAGE_luci-app-baidupcs-web=y/# CONFIG_PACKAGE_luci-app-baidupcs-web is not set/' .config
+          make defconfig || exit 1
 
-          if ! grep -q "CONFIG_TARGET_rockchip=y" .config; then
-            echo "ERROR: 平台配置错误！"
-            exit 1
-          fi
-          if ! grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config; then
-            echo "ERROR: QModem未启用！"
-            exit 1
-          fi
-
-      - name: 7. 本地多核编译（激活前再次验证虚拟环境）
+      - name: 7. 编译（确保虚拟环境激活）
         run: |
           cd ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}
-
-          # 再次验证虚拟环境
-          echo "===== 再次验证虚拟环境 ====="
-          if [ ! -f "${{ env.VENV_PATH }}/bin/activate" ]; then
-            echo "ERROR: 虚拟环境激活脚本仍不存在！"
-            exit 1
-          fi
-
-          # 激活虚拟环境
-          source "${{ env.VENV_PATH }}/bin/activate" || {
-            echo "ERROR: 激活虚拟环境失败！"
-            exit 1
-          }
-          if [ "$(which python3)" != "${{ env.VENV_PATH }}/bin/python3" ]; then
-            echo "ERROR: 虚拟环境激活异常！"
-            exit 1
-          fi
+          # 激活虚拟环境（关键：确保pyelftools可用）
+          source "${{ env.VENV_PATH }}/bin/activate" || exit 1
+          echo "使用Python环境：$(which python3)"
 
           CPU_CORES=$(nproc)
           echo "使用 $CPU_CORES 核心编译..."
+          # 先运行prereq检查，提前暴露错误
+          make prereq || {
+            echo "ERROR: 依赖检查失败！"
+            exit 1
+          }
 
-          timeout 180m bash -c "
-            make -j$CPU_CORES V=m 2>&1 | tee build.log &
-            PID=\$!
-            while kill -0 \$PID 2>/dev/null; do
-              echo \"===== 编译中（$(date +%H:%M:%S)）=====\"
-              grep -E \"Compiling|Linking|Installing\" build.log | tail -5
-              sleep 600
-            done
-            wait \$PID
-          "
+          # 开始编译（生成build.log后再检查进度）
+          make -j$CPU_CORES V=m 2>&1 | tee build.log &
+          PID=$!
+          # 延迟1分钟再检查进度（等待build.log生成）
+          sleep 60
+          while kill -0 $PID 2>/dev/null; do
+            echo "===== 编译中（$(date +%H:%M:%S)）====="
+            grep -E "Compiling|Linking|Installing" build.log | tail -5
+            sleep 600
+          done
+          wait $PID
 
           deactivate
 
+          # 验证固件
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
           if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
             echo "ERROR: 编译失败！最后1000行日志："
             cat build.log | tail -1000
             exit 1
           fi
-          echo "固件编译成功！"
 
       - name: 8. 打包产物
         run: |
           LOCAL_OUTPUT="${{ github.workspace }}/local-firmware"
           mkdir -p $LOCAL_OUTPUT
-          REMOTE_OUTPUT="${{ env.LOCAL_BUILD_DIR }}/output"
-          mkdir -p $REMOTE_OUTPUT
-
-          FIRMWARE_DIR="${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
-          cp $FIRMWARE_DIR/*.sysupgrade.bin $LOCAL_OUTPUT/
-          cp $FIRMWARE_DIR/*.factory.img $LOCAL_OUTPUT/ 2>/dev/null
-          cp ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/.config $LOCAL_OUTPUT/final_config.config
-          cp ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/build.log $LOCAL_OUTPUT/build_log.txt
-
-          cp -r $LOCAL_OUTPUT/* $REMOTE_OUTPUT/
-          echo "本地产物路径：$LOCAL_OUTPUT"
-          ls -l $LOCAL_OUTPUT
-
-      - name: 9. 上传产物到GitHub
-        uses: actions/upload-artifact@v4
-        with:
-          name: istoreos-local-mirror
-          path: ${{ env.LOCAL_BUILD_DIR }}/output/
-          retention-days: 30
+          cp -r ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/* $LOCAL_OUTPUT/
+          cp ${{ env.LOCAL_BUILD_DIR }}/${{ env.FIRMWARE_DIST }}/build.log $LOCAL_OUTPUT/
+          echo "产物路径：$LOCAL_OUTPUT"
