@@ -6,8 +6,8 @@ on:
     paths:
       - '.github/workflows/build-istoreos-xgp.yml'
       - 'xgp-qmodem.config'
-      - 'files/**'  # 当files目录下的配置文件变更时触发编译
-  workflow_dispatch:  # 支持手动触发
+      - 'files/**'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -15,16 +15,14 @@ jobs:
     env:
       TARGET_PLATFORM: rockchip
       TARGET_SUBPLATFORM: rk35xx
-      DEVICE_PROFILE: nlnet_xgp
       FIRMWARE_DIST: istoreos
-      # 【请替换为你的仓库信息】
-      YOUR_GITHUB_USERNAME: "你的GitHub用户名"  # 例如：username123
-      YOUR_REPO_NAME: "你的仓库名"              # 例如：xgp-firmware
-      YOUR_BRANCH_NAME: "main"                 # 例如：main或master
+      # 【关键：替换为你的xgp-qmodem.config的实际raw链接】
+      # 示例：CONFIG_URL="https://raw.githubusercontent.com/你的用户名/你的仓库名/main/xgp-qmodem.config"
+      CONFIG_URL: "https://raw.githubusercontent.com/你的用户名/你的仓库名/main/xgp-qmodem.config"
 
     steps:
-      - name: 1. 检查仓库代码
-        uses: actions/checkout@v4  # 拉取当前仓库代码（含files目录和config文件）
+      - name: 1. 拉取仓库代码（含files和config文件）
+        uses: actions/checkout@v4
 
       - name: 2. 安装依赖
         run: |
@@ -39,75 +37,70 @@ jobs:
         run: |
           git clone https://github.com/istoreos/istoreos.git $FIRMWARE_DIST
           cd $FIRMWARE_DIST
-          # 切换到最新稳定版（可手动指定版本，如v23.05.2）
           git checkout $(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+' | head -1)
 
       - name: 4. 集成QModem
         run: |
           cd $FIRMWARE_DIST
-          # 添加QModem软件源
           echo "src-git qmodem https://github.com/FUjr/QModem.git" >> feeds.conf.default
-          # 更新并安装软件包（精简日志输出）
           ./scripts/feeds update -a > /dev/null 2>&1
           ./scripts/feeds install -a -f
 
-      - name: 5. 导入配置文件（关键修复）
+      - name: 5. 下载并验证配置文件（核心修复）
         run: |
           cd $FIRMWARE_DIST
-          # 从你的仓库下载xgp-qmodem.config（使用实际raw链接）
-          CONFIG_URL="https://raw.githubusercontent.com/${{ env.YOUR_GITHUB_USERNAME }}/${{ env.YOUR_REPO_NAME }}/${{ env.YOUR_BRANCH_NAME }}/xgp-qmodem.config"
-          echo "正在从以下地址下载配置文件：$CONFIG_URL"
+          echo "当前使用的配置文件URL：${{ env.CONFIG_URL }}"
           
-          # 下载并验证文件是否存在
-          if ! wget -O .config "$CONFIG_URL"; then
-            echo "ERROR: 配置文件下载失败，请检查URL是否正确！"
-            echo "正确格式应为：https://raw.githubusercontent.com/用户名/仓库名/分支名/xgp-qmodem.config"
+          # 检测URL是否有效（HTTP状态码应为200）
+          if ! curl -s --head "${{ env.CONFIG_URL }}" | grep "HTTP/1.1 200 OK" > /dev/null; then
+            echo "ERROR: 配置文件URL无效！请检查以下问题："
+            echo "1. URL是否正确（格式：https://raw.githubusercontent.com/用户名/仓库名/分支名/文件名）"
+            echo "2. 文件是否已上传到仓库的对应路径"
+            echo "3. 分支名是否正确（如main/master）"
             exit 1
           fi
           
-          # 生成完整配置
-          make defconfig
+          # 下载配置文件
+          if ! wget -O .config "${{ env.CONFIG_URL }}"; then
+            echo "ERROR: 配置文件下载失败，请重新检查URL！"
+            exit 1
+          fi
           
-          # 验证QModem是否启用
+          # 生成完整配置并验证QModem
+          make defconfig
           if ! grep -q "CONFIG_PACKAGE_luci-app-qmodem=y" .config; then
-            echo "ERROR: 配置文件中未启用QModem，请检查xgp-qmodem.config是否包含该选项！"
+            echo "ERROR: 配置文件中未启用QModem，请检查xgp-qmodem.config！"
             exit 1
           fi
 
       - name: 6. 复制预配置文件（WiFi+5G自启）
         run: |
           cd $FIRMWARE_DIST
-          # 将仓库中的files目录复制到源码中（确保固件打包时包含）
           if [ -d "../files" ]; then
             cp -r ../files/ ./files/
             echo "已复制预配置文件：$(ls -R ./files)"
           else
-            echo "ERROR: 未找到files目录，请确认仓库中存在files/etc/config等结构！"
+            echo "ERROR: 仓库中未找到files目录，请按要求创建！"
             exit 1
           fi
 
       - name: 7. 编译固件（日志控制）
         run: |
           cd $FIRMWARE_DIST
-          # 限制日志输出量，同时保存完整日志（防止中断）
           make -j$(nproc) V=sc 2>&1 | tee build.log
-          
-          # 验证固件是否生成
           FIRMWARE_DIR="bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM"
           if [ ! -d "$FIRMWARE_DIR" ] || [ -z "$(ls $FIRMWARE_DIR/*.sysupgrade.bin 2>/dev/null)" ]; then
             echo "ERROR: 固件编译失败！"
-            cat build.log | tail -300  # 输出最后300行日志用于排查
+            cat build.log | tail -300
             exit 1
           fi
 
-      - name: 8. 打包输出产物
+      - name: 8. 打包并上传产物
         run: |
           cd $FIRMWARE_DIST
           mkdir -p output
-          # 复制固件文件
           cp bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/*.sysupgrade.bin output/
           cp bin/targets/$TARGET_PLATFORM/$TARGET_SUBPLATFORM/*.factory.img output/
-          # 复制配置文件和日志（用于调试）
           cp .config output/final-config.config
           cp build.log output/build-log.txt
 
