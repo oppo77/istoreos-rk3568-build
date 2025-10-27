@@ -954,6 +954,7 @@ EOF
           gzip $BUILD_LOG_FILE
           echo "✅ 固件编译完成"
 
+
       - name: 9. 上传产物（固件 + 日志）
         uses: actions/upload-artifact@v4
         with:
