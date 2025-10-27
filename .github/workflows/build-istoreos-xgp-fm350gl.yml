@@ -237,7 +237,7 @@ CONFIG_PACKAGE_libimobiledevice-glue=y
 CONFIG_PACKAGE_libiperf3=y
 CONFIG_PACKAGE_libipset=y
 CONFIG_PACKAGE_libiptext=y
-CONFIG_PACKAGE_libiptext-nft=y
+CONFIG_PACKAGE_libiptext-nft: y
 CONFIG_PACKAGE_libiptext6=y
 CONFIG_PACKAGE_libkeyutils=y
 CONFIG_PACKAGE_libkmod=y
