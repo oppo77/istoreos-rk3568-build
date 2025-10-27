@@ -1,4 +1,4 @@
-name: iStoreOS for XGP Build
+name: iStoreOS for XGP Build (FM350GL Support)
 
 on:
   push:
@@ -9,9 +9,8 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     env:
-      # 防止日志过大导致中断
       BUILD_TIMEOUT: 1800
-      BUILD_LOG_LIMIT: 1000000  # 限制日志大小为 1MB
+      BUILD_LOG_LIMIT: 1000000  # 限制日志大小1MB
 
     steps:
     - name: Checkout iStoreOS source
@@ -30,7 +29,7 @@ jobs:
     - name: Set up dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libncurses-dev zlib1g-dev gawk git wget curl subversion libssl-dev libelf-dev libxml2-dev libxslt1-dev python3 python3-pip python3-setuptools python3-venv python3-dev libffi-dev libexpat1-dev liblz4-tool liblzo2-dev libzstd-dev libunwind8 libunwind-dev libtinfo5 libtinfo-dev libcap-dev libcap-dev libcap-ng-dev libseccomp-dev libseccomp-dev libmnl-dev libnl-genl-3-dev libnl-route-3-dev libnl-3-dev libnl-genl-3-dev libnl-genl-3-dev libnl-3-dev libnl-route-3-dev libnl-3-dev libnl-genl-3-dev libnl-3-dev libnl-route-3-dev
+        sudo apt-get install -y build-essential libncurses-dev zlib1g-dev gawk git wget curl subversion libssl-dev libelf-dev libxml2-dev libxslt1-dev python3 python3-pip python3-setuptools python3-venv python3-dev libffi-dev libexpat1-dev liblz4-tool liblzo2-dev libzstd-dev libunwind8 libunwind-dev libtinfo5 libtinfo-dev libcap-dev libcap-ng-dev libseccomp-dev libmnl-dev libnl-genl-3-dev libnl-route-3-dev
 
     - name: Setup build environment
       run: |
@@ -39,10 +38,24 @@ jobs:
         ./scripts/feeds install -a
         mkdir -p ./target/linux/rockchip/patches
         cp -r ../QModem/patches/* ./target/linux/rockchip/patches/
-        echo "CONFIG_PACKAGE_luci-app-wifi-hotspot=y" >> ./target/linux/rockchip/config-5.10
-        echo "CONFIG_PACKAGE_modemmanager-with-mbim=y" >> ./target/linux/rockchip/config-5.10
-        echo "CONFIG_PACKAGE_modemmanager-with-qmi=y" >> ./target/linux/rockchip/config-5.10
-        echo "CONFIG_PACKAGE_modemmanager-with-qrtr=y" >> ./target/linux/rockchip/config-5.10
+        
+        # 添加FM350GL专属配置
+        echo "CONFIG_PACKAGE_modemmanager-with-mbim=y" >> ../config.txt
+        echo "CONFIG_PACKAGE_modemmanager-with-qrtr=y" >> ../config.txt
+        echo "CONFIG_PACKAGE_kmod-qrtr=y" >> ../config.txt
+        echo "CONFIG_PACKAGE_kmod-qrtr-mhi=y" >> ../config.txt
+        echo "CONFIG_PACKAGE_kmod-mhi-bus=y" >> ../config.txt
+        echo "CONFIG_PACKAGE_kmod-mhi-net=y" >> ../config.txt
+        echo "CONFIG_PACKAGE_kmod-mhi-wwan-ctrl=y" >> ../config.txt
+        echo "CONFIG_PACKAGE_luci-app-wifi-hotspot=y" >> ../config.txt
+        echo "CONFIG_PACKAGE_luci-app-modemmanager=y" >> ../config.txt
+
+    - name: Copy FM350GL USB IDs
+      run: |
+        cd iStoreOS
+        mkdir -p files/etc
+        cp ../QModem/usb.ids files/etc/  # 包含FM350GL的USB ID (19d2:0001)
+        echo "CONFIG_PACKAGE_base-files-etc=y" >> .config
 
     - name: Apply config
       run: |
@@ -55,19 +68,23 @@ jobs:
     - name: Build iStoreOS
       run: |
         cd iStoreOS
-        # 添加 --no-verbose 参数防止日志过大
-        # 使用 tee 限制日志大小
+        # 添加防止日志过大的关键参数
         make -j$(nproc) V=s | tee build.log | head -c ${{ env.BUILD_LOG_LIMIT }}
-        # 检查构建是否成功
         if [ ! -f bin/targets/rockchip/armv8/xgp/squashfs-sysupgrade.bin ]; then
           echo "Build failed"
           exit 1
         fi
 
+    - name: Verify build artifacts
+      run: |
+        cd iStoreOS
+        ls -lh bin/targets/rockchip/armv8/xgp/
+        file bin/targets/rockchip/armv8/xgp/squashfs-sysupgrade.bin
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v3
       with:
-        name: iStoreOS-XGP
+        name: iStoreOS-XGP-FM350GL
         path: iStoreOS/bin/targets/rockchip/armv8/xgp/squashfs-sysupgrade.bin
         retention-days: 30
 
