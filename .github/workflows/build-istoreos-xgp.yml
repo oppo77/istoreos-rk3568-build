@@ -41,9 +41,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android
           sudo apt update -qq
           sudo apt -y purge azure-cli* docker* ghc* zulu* llvm* firefox google*
-          sudo apt -y install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-            gettext git libncurses5-dev libssl-dev python3 python3-pip rsync subversion \
-            swig unzip zlib1g-dev device-tree-compiler liblz4-tool curl wget
+          sudo apt -y install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3 python3-pip rsync subversion swig unzip zlib1g-dev device-tree-compiler liblz4-tool curl wget
           sudo pip3 install pyelftools
           sudo apt autoremove --purge -y
           sudo apt clean -y
@@ -130,7 +128,6 @@ config wifi-device 'radio0'
     option htmode 'HT20'
     option country 'CN'
     option disabled '0'
-
 config wifi-iface 'default_radio0'
     option device 'radio0'
     option network 'lan'
@@ -138,7 +135,6 @@ config wifi-iface 'default_radio0'
     option ssid '${{ github.event.inputs.wifi_2g_ssid }}'
     option encryption 'psk2'
     option key '${{ github.event.inputs.wifi_password }}'
-
 config wifi-device 'radio1'
     option type 'mac80211'
     option path 'platform/soc/fe300000.mmci/mmc_host/mmc2/mmc2:0001/mmc2:0001:1'
@@ -147,7 +143,6 @@ config wifi-device 'radio1'
     option htmode 'VHT80'
     option country 'CN'
     option disabled '0'
-
 config wifi-iface 'default_radio1'
     option device 'radio1'
     option network 'lan'
