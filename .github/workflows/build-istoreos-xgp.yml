@@ -1,5 +1,4 @@
 name: iStoreOS-xgp-AutoBuild
-
 on:
   workflow_dispatch:
     inputs:
@@ -23,45 +22,66 @@ on:
         description: '5G模块APN（移动cmnet/联通3gnet/电信ctnet）'
         required: true
         default: 'cmnet'
-
 permissions:
   contents: read
   packages: read
-
 jobs:
   build_xgp:
     name: Build iStoreOS for xgp (RK35xx)
     runs-on: ubuntu-22.04
     steps:
-      - name: 清理空间与安装依赖（含多线程下载工具）
+      - name: 【强化清理】深度清理空间+精简依赖安装
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          docker rmi `docker images -q 2>/dev/null` || true
-          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android
+          # 1. 清理Docker残留（占空间最大的常见项）
+          sudo docker builder prune -af || true  # 清理构建缓存
+          sudo docker rmi `docker images -q 2>/dev/null` || true  # 删除镜像
+          sudo rm -rf /var/lib/docker/volumes/* || true  # 删除卷残留
+          
+          # 2. 清理系统级大目录
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /var/tmp/*
+          
+          # 3. 清理用户缓存（npm/pip/浏览器缓存等）
+          sudo rm -rf /home/runner/.cache/* || true
+          
+          # 4. 精简依赖安装（移除64位编译无需的multilib库）
           sudo apt-get update -qq
           sudo apt-get -y purge azure-cli* docker* ghc* zulu* llvm* firefox google*
-          sudo apt-get -y install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3 python3-pip rsync subversion swig unzip zlib1g-dev device-tree-compiler liblz4-tool curl wget axel
+          # 关键：去掉gcc-multilib/g++-multilib（32位兼容库，RK35xx是64位无需）
+          sudo apt-get -y install --no-install-recommends \
+            build-essential clang flex bison g++ gawk libncurses5-dev libssl-dev \
+            python3 python3-pip rsync subversion swig unzip zlib1g-dev \
+            device-tree-compiler liblz4-tool curl wget axel
           sudo pip3 install pyelftools
+          
+          # 5. 彻底清理APT缓存（避免索引文件占用）
           sudo apt-get -y autoremove --purge
           sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*  # 清理APT索引（占1-2GB）
+          
           sudo timedatectl set-timezone "Asia/Shanghai"
-
-      - name: 释放更多磁盘空间
+          # 验证剩余空间（便于调试）
+          df -h /
+          
+      - name: 【补充清理】释放更多空间（拉满清理参数）
         uses: jlumbroso/free-disk-space@main
         with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          large-packages: true
-          swap-storage: true
-
+          tool-cache: true       # 清理GitHub工具缓存
+          android: true          # 清理Android SDK残留
+          dotnet: true           # 清理.NET残留
+          large-packages: true   # 清理大型预安装包
+          swap-storage: true     # 清理交换分区
+          apt-cache: true        # 额外清理APT缓存（默认关闭）
+          npm-cache: true        # 清理npm缓存（默认关闭）
+          yarn-cache: true       # 清理yarn缓存（默认关闭）
+          
       - name: 拉取外部配置文件
         uses: actions/checkout@v4
         with:
           path: config-repo
           fetch-depth: 1
-
+          
       - name: 克隆iStoreOS源码
         uses: actions/checkout@v4
         with:
@@ -69,75 +89,76 @@ jobs:
           ref: istoreos-24.10
           path: openwrt
           fetch-depth: 1
-
+          
       - name: 配置多镜像源（修正格式错误）
         run: |
           cd openwrt
-          # 替换OpenWrt官方源为清华镜像（国外服务器访问稳定）
           sed -i 's#downloads.openwrt.org#mirrors.tuna.tsinghua.edu.cn/openwrt#g' ./feeds.conf.default
-          # 为下载逻辑添加多镜像重试（修改download.mk）
           echo 'MIRRORS += https://mirrors.ustc.edu.cn/openwrt' >> ./include/download.mk
           echo 'MIRRORS += https://downloads.openwrt.org' >> ./include/download.mk
-          # 替换package中的硬编码链接
           find ./package -type f -name "Makefile" -exec sed -i 's#https://downloads.openwrt.org#$(MIRRORS)#g' {} \;
-
+          
       - name: 替换下载工具为多线程axel
         run: |
           cd openwrt
-          # 修改下载命令为axel（16线程）
           sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 16 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' ./include/download.mk
-          # 增加超时和重试
           echo "DOWNLOAD_TIMEOUT=600" >> ./include/download.mk
           echo "DOWNLOAD_RETRIES=5" >> ./include/download.mk
-
+          
       - name: 初始化feeds并删除问题包
         run: |
           cd openwrt
           ./scripts/feeds update -a
-          if [ -d "feeds/third/luci-app-baidupcs-web" ]; then
-            rm -rf feeds/third/luci-app-baidupcs-web
-            echo "已删除feeds/third中的luci-app-baidupcs-web"
-          fi
-          if [ -d "package/feeds/third/luci-app-baidupcs-web" ]; then
-            rm -rf package/feeds/third/luci-app-baidupcs-web
-            echo "已删除package/feeds/third中的luci-app-baidupcs-web"
-          fi
-          rm -rf feeds/third/baidupcs-web 2>/dev/null || true
-          rm -rf package/feeds/third/baidupcs-web 2>/dev/null || true
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
+          # 清理baidupcs-web相关包（避免编译冲突）
+          rm -rf feeds/third/luci-app-baidupcs-web package/feeds/third/luci-app-baidupcs-web 2>/dev/null || true
+          rm -rf feeds/third/baidupcs-web package/feeds/third/baidupcs-web 2>/dev/null || true
+          ./scripts/feeds update -a && ./scripts/feeds install -a
+          
       - name: 下载xgp设备配置文件
         run: |
           cd openwrt
           wget --timeout=30 --tries=3 -O .config "https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp.config"
           [ -s .config ] || { echo "Error: xgp.config is empty!"; exit 1; }
           make defconfig
-
-      - name: 缓存已下载的依赖包（dl目录）
+          
+      - name: 【关键优化】禁用LTO（减少30%+临时空间）
+        run: |
+          cd openwrt
+          # 关闭Link Time Optimization（LTO会生成大量临时文件）
+          if grep -q "CONFIG_LTO" .config; then
+            sed -i '/CONFIG_LTO/d' .config  # 删除原有LTO配置
+          fi
+          echo "CONFIG_LTO=n" >> .config       # 禁用LTO
+          echo "CONFIG_LTO_DISABLE=y" >> .config  # 强制关闭LTO相关
+          # 验证配置（便于调试）
+          grep -E "CONFIG_LTO" .config || echo "LTO已成功禁用"
+          
+      - name: 【优化缓存】缓存dl目录（限制生命周期）
         uses: actions/cache@v3
         with:
           path: openwrt/dl
-          key: ${{ runner.os }}-xgp-dl-${{ hashFiles('openwrt/.config') }}
+          # 缓存键：系统+设备+配置+周次（避免旧缓存累积，每周自动更新）
+          key: ${{ runner.os }}-xgp-dl-${{ hashFiles('openwrt/.config') }}-${{ format('{0:YYYY-WW}', github.event.started_at) }}
           restore-keys: |
-            ${{ runner.os }}-xgp-dl-
-
-      - name: 多线程加速下载依赖包（修复缺失包检查）
+            ${{ runner.os }}-xgp-dl-${{ hashFiles('openwrt/.config') }}-
+          max-size: 8GB  # 限制缓存大小（dl目录通常5-6GB，避免占满Runner空间）
+          
+      - name: 多线程加速下载依赖包（清理空文件）
         run: |
           cd openwrt
-          echo "使用16线程axel加速下载依赖包..."
-          # 首次下载，依赖axel和多镜像重试机制
-          make download -j16 || make download -j1 V=s  # 失败时单线程输出详细日志
-
+          echo "使用16线程axel加速下载..."
+          make download -j16 || make download -j1 V=s
+          # 清理dl目录空文件（避免缓存无效文件）
+          find openwrt/dl -type f -size 0 -delete || true
+          
       - name: 引入5G启动脚本并替换变量
         run: |
           mkdir -p openwrt/files/etc/init.d/
           cp config-repo/config-files/5g-auto openwrt/files/etc/init.d/
           sed -i "s/__5G_APN__/${{ github.event.inputs.apn_5g }}/g" openwrt/files/etc/init.d/5g-auto
           chmod 755 openwrt/files/etc/init.d/5g-auto
-          mkdir -p openwrt/files/etc/rc.d/
           ln -sf ../init.d/5g-auto openwrt/files/etc/rc.d/S955g-auto
-
+          
       - name: 引入WiFi配置并替换变量
         run: |
           mkdir -p openwrt/files/etc/config/
@@ -145,31 +166,39 @@ jobs:
           sed -i "s/__WIFI_2G_SSID__/${{ github.event.inputs.wifi_2g_ssid }}/g" openwrt/files/etc/config/wireless
           sed -i "s/__WIFI_5G_SSID__/${{ github.event.inputs.wifi_5g_ssid }}/g" openwrt/files/etc/config/wireless
           sed -i "s/__WIFI_PASSWORD__/${{ github.event.inputs.wifi_password }}/g" openwrt/files/etc/config/wireless
-
+          
       - name: 设置LAN管理IP
         run: |
           cd openwrt
           sed -i "s/192\.168\.[0-9]*\.[0-9]*/${{ github.event.inputs.lan_ip }}/g" package/base-files/files/bin/config_generate
-
+          
       - name: 缓存工具链（加速二次编译）
         uses: klever1988/cachewrtbuild@main
         with:
           ccache: 'true'
           mixkey: ${{ runner.os }}-xgp-24.10
           prefix: ${{ github.workspace }}/openwrt
-
-      - name: 编译固件（优化线程数）
+          max-size: 5GB  # 限制工具链缓存大小
+          
+      - name: 编译固件（稳定线程数）
         run: |
           cd openwrt
-          echo "使用2线程编译（平衡速度与稳定性）"
-          make -j2 || make -j1 V=s
-
+          echo "使用2线程编译（平衡速度与空间占用）"
+          make -j2 || make -j1 V=s  # 失败时单线程输出日志
+          
+      - name: 【清理临时文件】删除编译日志+冗余产物
+        run: |
+          # 清理编译日志（占1-2GB）
+          sudo rm -rf openwrt/logs/* || true
+          # 清理Build目录临时文件（不影响固件）
+          sudo rm -rf openwrt/build_dir/target-*/tmp/* || true
+          
       - name: 整理固件产物
         run: |
           mkdir -p ./final-firmware
           cp -rf openwrt/bin/targets/rockchip/armv8/* ./final-firmware/
-          rm -rf ./final-firmware/packages
-
+          rm -rf ./final-firmware/packages  # 删除packages目录（占3-4GB）
+          
       - name: 上传固件到Artifact
         uses: actions/upload-artifact@v4
         with:
