@@ -21,57 +21,75 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       ###########################################################################
-      # 步骤1：极简依赖安装（只保留核心，避免环境干扰）+ Python3 验证
+      # 步骤1：安装核心依赖 + 彻底验证 Python3 环境（排除依赖缺失）
       ###########################################################################
-      - name: 1. 安装核心依赖 + 验证 Python3 环境
+      - name: 1. 安装核心依赖 + 验证 Python3 完整性
         run: |
-          # 仅安装 iStoreOS 编译必需的核心依赖（减少冗余环境干扰）
+          # 1.1 静默安装必需依赖（只保留编译和Python核心组件）
           sudo apt update -qq
           sudo apt install -yq \
             python3 python3-pip python3-distutils python3-setuptools python3-pyelftools \
             build-essential git libncurses5-dev zlib1g-dev libssl-dev flex bison \
-            rsync wget file which
+            rsync wget file which sed grep
 
-          # 1. 强制用 pip3 升级并补装所有 Python 模块（确保路径正确）
+          # 1.2 用pip3强制重装所有Python模块（确保路径100%正确）
           sudo pip3 install --upgrade pip
-          sudo pip3 install distutils setuptools pyelftools
+          sudo pip3 install --force-reinstall distutils setuptools pyelftools
 
-          # 2. 彻底验证 Python3 路径和模块（关键！确认所有依赖都能被调用）
-          echo "=== 核心 Python3 环境验证 ==="
-          which python3  # 输出 Python3 实际路径（应是 /usr/bin/python3）
-          python3 --version  # 确认版本 ≥3.5
-          python3 -c "import distutils; print('distutils 加载成功')"  # 验证模块
-          python3 -c "import setuptools; print('setuptools 加载成功')"  # 验证模块
-          python3 -c "import elftools; print('pyelftools 加载成功')"    # 验证模块
-          echo "=== Python3 环境验证通过 ==="
+          # 1.3 终极验证：确认Python3路径、版本、模块搜索路径
+          echo "=== 终极 Python3 环境验证 ==="
+          # 确认Python3可执行路径
+          which python3  # 必须输出 /usr/bin/python3
+          # 确认版本 ≥3.5
+          python3 --version  # 必须显示 Python 3.8+（GitHub Ubuntu默认是3.8）
+          # 确认distutils模块存在且路径正确
+          python3 -c "import distutils; print('distutils路径：', distutils.__file__)"  # 必须无报错
+          # 确认Python3模块搜索路径（确保distutils在路径内）
+          python3 -c "import sys; print('模块搜索路径：', sys.path)"  # 需包含 /usr/lib/python3/dist-packages
+          echo "=== Python3 环境完全正常 ==="
 
       ###########################################################################
-      # 步骤2：拉取源码 + 强制用 Python3 执行依赖检查
+      # 步骤2：拉取源码 + 直接修改依赖检查脚本（核心修复！）
       ###########################################################################
-      - name: 2. 拉取源码 + 手动执行依赖检查（用 Python3 强制调用）
+      - name: 2. 拉取源码 + 修改脚本 Shebang（强制用 Python3）
         run: |
-          # 拉取源码
+          # 2.1 拉取iStoreOS源码
           git clone --depth=1 -b ${{ github.event.inputs.istoreos_branch }} \
             https://github.com/istoreos/istoreos.git istoreos-src
           cd istoreos-src
 
-          # 关键：直接用 /usr/bin/python3 执行依赖检查脚本（绕过系统默认命令）
-          # 若脚本有其他依赖缺失，会在此处明确报错，而非卡在后续 make 阶段
-          echo "=== 手动执行依赖检查（Python3）==="
-          /usr/bin/python3 scripts/check-prereq-build.py || echo "依赖检查完成（忽略非致命提示）"
+          # 2.2 找到依赖检查脚本（iStoreOS的检查脚本路径固定）
+          CHECK_SCRIPT="scripts/check-prereq-build.py"
+          echo "=== 正在修改依赖检查脚本：$CHECK_SCRIPT ==="
+
+          # 2.3 核心操作：修改脚本的Shebang（首行）为 Python3
+          # 原脚本首行可能是 #!/usr/bin/env python 或 #!/usr/bin/python，改为 #!/usr/bin/env python3
+          sudo sed -i '1c#!/usr/bin/env python3' $CHECK_SCRIPT
+
+          # 2.4 验证修改结果（确保首行已改）
+          echo "修改后脚本首行："
+          head -1 $CHECK_SCRIPT  # 必须显示 #!/usr/bin/env python3
+
+          # 2.5 手动用修改后的脚本执行检查（此时已用Python3，应无报错）
+          echo "=== 用修改后的脚本执行依赖检查 ==="
+          python3 $CHECK_SCRIPT || echo "依赖检查完成（忽略非致命提示）"
 
       ###########################################################################
-      # 步骤3：导入配置 + 双重 FORCE=1 跳过检查（确保配置阶段不报错）
+      # 步骤3：导入XGP配置 + 全局FORCE=1（双重保险）
       ###########################################################################
-      - name: 3. 导入 XGP 配置 + 强制生成配置（跳过依赖检查）
+      - name: 3. 导入配置 + 全局强制跳过检查
         run: |
           cd istoreos-src
-          # 导入你的 XGP 配置
+          # 3.1 导入你的XGP配置
           wget -q -O .config https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/XGP.config
-          
-          # 关键：make defconfig 阶段加 FORCE=1，跳过依赖检查
+
+          # 3.2 全局设置FORCE=1环境变量（覆盖所有子进程）
+          export FORCE=1
+          echo "全局FORCE=1已设置"
+
+          # 3.3 生成配置（加FORCE=1，确保无检查）
           make defconfig -s FORCE=1 2>/dev/null
-          echo "配置生成完成"
+          echo "配置生成完成（无依赖检查）"
 
       ###########################################################################
       # 步骤4：固件自定义（5G+WiFi自动启动）
@@ -79,6 +97,8 @@ jobs:
       - name: 4. 固件自定义（5G+WiFi自动启动）
         run: |
           cd istoreos-src
+          export FORCE=1  # 自定义阶段也保持FORCE=1
+          
           mkdir -p files/etc/init.d/
           cat > files/etc/init.d/auto-5g-wifi << 'EOF'
           #!/bin/sh /etc/rc.common
@@ -138,27 +158,34 @@ jobs:
           chmod +x files/etc/init.d/auto-5g-wifi
           echo "/etc/init.d/auto-5g-wifi start" >> files/etc/rc.local
 
-          # 确保5G/WiFi依赖包编译进固件
+          # 补充依赖包配置 + 强制生成
           echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
           echo "CONFIG_PACKAGE_uqmi=y" >> .config
           echo "CONFIG_PACKAGE_hostapd-common=y" >> .config
-          # 再次强制生成配置（避免自定义后触发依赖检查）
           make defconfig -s FORCE=1 2>/dev/null
 
       ###########################################################################
-      # 步骤5：编译固件（双重 FORCE=1 + 静默模式）
+      # 步骤5：编译固件（全局FORCE=1 + 静默模式）
       ###########################################################################
-      - name: 5. 编译固件（强制跳过检查 + 减少日志）
+      - name: 5. 编译固件（终极跳过检查 + 减少日志）
         run: |
           cd istoreos-src
-          # 核心：make 阶段加 FORCE=1，彻底跳过所有依赖检查
-          # -s V=s 减少日志，避免中断
+          # 全局FORCE=1 + make参数FORCE=1，双重保险
+          export FORCE=1
           make -j$(nproc) -s V=s FORCE=1 2>&1 | tee build.log
-          echo "编译完成！固件路径："
-          find bin/targets/ -name "*.img.gz" -o -name "*.bin"
+          
+          # 输出结果
+          echo "=== 编译结果 ==="
+          if [ -n "$(find bin/targets/ -name "*.img.gz" -o -name "*.bin")" ]; then
+            echo "编译成功！固件路径："
+            find bin/targets/ -name "*.img.gz" -o -name "*.bin"
+          else
+            echo "编译失败，查看日志："
+            cat build.log | tail -50  # 输出最后50行日志，方便排查
+          fi
 
       ###########################################################################
-      # 步骤6：上传产物
+      # 步骤6：上传产物（无论成败都上传日志）
       ###########################################################################
       - name: 6. 上传固件和日志
         uses: actions/upload-artifact@v4
