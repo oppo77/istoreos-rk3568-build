@@ -1,4 +1,4 @@
-name: 编译 iStoreOS（XGP 设备）- 自动启5G+WiFi热点
+name: 【调试版】编译 iStoreOS（XGP）- 详细日志
 
 on:
   workflow_dispatch:
@@ -8,191 +8,141 @@ on:
         required: true
         default: 'main'
       wifi_ssid:
-        description: 'WiFi热点名称（SSID）'
+        description: 'WiFi热点名称'
         required: true
         default: 'XGP-5G-Hotspot'
       wifi_password:
-        description: 'WiFi热点密码（8-63位）'
+        description: 'WiFi密码'
         required: true
         default: 'XGP123456'
 
 jobs:
-  build-istoreos-xgp:
+  build-debug:
     runs-on: ubuntu-latest
     steps:
       ###########################################################################
-      # 步骤1：安装核心依赖 + 彻底验证 Python3 环境（排除依赖缺失）
+      # 步骤1：安装依赖 + 打印所有Python相关环境（关键调试信息）
       ###########################################################################
-      - name: 1. 安装核心依赖 + 验证 Python3 完整性
+      - name: 1. 安装依赖 + 打印Python环境（详细日志）
         run: |
-          # 1.1 静默安装必需依赖（只保留编译和Python核心组件）
-          sudo apt update -qq
-          sudo apt install -yq \
+          # 关闭静默，显示所有apt安装日志
+          sudo apt update
+          sudo apt install -y \
             python3 python3-pip python3-distutils python3-setuptools python3-pyelftools \
             build-essential git libncurses5-dev zlib1g-dev libssl-dev flex bison \
             rsync wget file which sed grep
 
-          # 1.2 用pip3强制重装所有Python模块（确保路径100%正确）
-          sudo pip3 install --upgrade pip
-          sudo pip3 install --force-reinstall distutils setuptools pyelftools
+          # 【调试1】打印所有Python相关命令的路径和版本
+          echo "===== 所有Python命令路径 ====="
+          which python || echo "python 命令不存在"
+          which python3 || echo "python3 命令不存在"
+          which python3.8 || echo "python3.8 命令不存在"  # GitHub Ubuntu默认3.8
+          
+          echo -e "\n===== 所有Python版本 ====="
+          python --version 2>&1 || echo "python 版本查询失败"
+          python3 --version 2>&1 || echo "python3 版本查询失败"
+          python3.8 --version 2>&1 || echo "python3.8 版本查询失败"
 
-          # 1.3 终极验证：确认Python3路径、版本、模块搜索路径
-          echo "=== 终极 Python3 环境验证 ==="
-          # 确认Python3可执行路径
-          which python3  # 必须输出 /usr/bin/python3
-          # 确认版本 ≥3.5
-          python3 --version  # 必须显示 Python 3.8+（GitHub Ubuntu默认是3.8）
-          # 确认distutils模块存在且路径正确
-          python3 -c "import distutils; print('distutils路径：', distutils.__file__)"  # 必须无报错
-          # 确认Python3模块搜索路径（确保distutils在路径内）
-          python3 -c "import sys; print('模块搜索路径：', sys.path)"  # 需包含 /usr/lib/python3/dist-packages
-          echo "=== Python3 环境完全正常 ==="
+          # 【调试2】打印Python环境变量（关键！看是否有路径冲突）
+          echo -e "\n===== Python相关环境变量 ====="
+          echo "PATH: $PATH"
+          echo "PYTHONPATH: ${PYTHONPATH:-未设置}"
+          echo "which -a python: $(which -a python 2>&1)"  # 显示所有python可执行文件路径
+          echo "which -a python3: $(which -a python3 2>&1)"
+
+          # 【调试3】验证Python3模块是否真的存在（详细报错）
+          echo -e "\n===== 验证Python3模块 ====="
+          python3 -c "import distutils; print('distutils 加载成功，路径：', distutils.__file__)" 2>&1
+          python3 -c "import setuptools; print('setuptools 加载成功，路径：', setuptools.__file__)" 2>&1
+          python3 -c "import elftools; print('pyelftools 加载成功，路径：', elftools.__file__)" 2>&1
+
+          # 【调试4】查看Python3的模块搜索路径（看distutils是否在其中）
+          echo -e "\n===== Python3 模块搜索路径 ====="
+          python3 -c "import sys; print('模块搜索路径：'); for path in sys.path: print(path)"
 
       ###########################################################################
-      # 步骤2：拉取源码 + 直接修改依赖检查脚本（核心修复！）
+      # 步骤2：拉取源码 + 修改脚本 + 追踪脚本执行过程
       ###########################################################################
-      - name: 2. 拉取源码 + 修改脚本 Shebang（强制用 Python3）
+      - name: 2. 拉取源码 + 脚本修改 + 执行追踪（详细日志）
         run: |
-          # 2.1 拉取iStoreOS源码
           git clone --depth=1 -b ${{ github.event.inputs.istoreos_branch }} \
             https://github.com/istoreos/istoreos.git istoreos-src
           cd istoreos-src
 
-          # 2.2 找到依赖检查脚本（iStoreOS的检查脚本路径固定）
+          # 【调试5】修改脚本Shebang并验证（显示修改前后对比）
           CHECK_SCRIPT="scripts/check-prereq-build.py"
-          echo "=== 正在修改依赖检查脚本：$CHECK_SCRIPT ==="
-
-          # 2.3 核心操作：修改脚本的Shebang（首行）为 Python3
-          # 原脚本首行可能是 #!/usr/bin/env python 或 #!/usr/bin/python，改为 #!/usr/bin/env python3
-          sudo sed -i '1c#!/usr/bin/env python3' $CHECK_SCRIPT
-
-          # 2.4 验证修改结果（确保首行已改）
-          echo "修改后脚本首行："
-          head -1 $CHECK_SCRIPT  # 必须显示 #!/usr/bin/env python3
-
-          # 2.5 手动用修改后的脚本执行检查（此时已用Python3，应无报错）
-          echo "=== 用修改后的脚本执行依赖检查 ==="
-          python3 $CHECK_SCRIPT || echo "依赖检查完成（忽略非致命提示）"
-
-      ###########################################################################
-      # 步骤3：导入XGP配置 + 全局FORCE=1（双重保险）
-      ###########################################################################
-      - name: 3. 导入配置 + 全局强制跳过检查
-        run: |
-          cd istoreos-src
-          # 3.1 导入你的XGP配置
-          wget -q -O .config https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/XGP.config
-
-          # 3.2 全局设置FORCE=1环境变量（覆盖所有子进程）
-          export FORCE=1
-          echo "全局FORCE=1已设置"
-
-          # 3.3 生成配置（加FORCE=1，确保无检查）
-          make defconfig -s FORCE=1 2>/dev/null
-          echo "配置生成完成（无依赖检查）"
-
-      ###########################################################################
-      # 步骤4：固件自定义（5G+WiFi自动启动）
-      ###########################################################################
-      - name: 4. 固件自定义（5G+WiFi自动启动）
-        run: |
-          cd istoreos-src
-          export FORCE=1  # 自定义阶段也保持FORCE=1
+          echo -e "\n===== 修改前脚本首行 ====="
+          head -3 $CHECK_SCRIPT  # 显示前3行，确认Shebang
           
+          sudo sed -i '1c#!/usr/bin/env python3' $CHECK_SCRIPT
+          echo -e "\n===== 修改后脚本首行 ====="
+          head -3 $CHECK_SCRIPT  # 确认已改为python3
+
+          # 【调试6】用bash -x追踪脚本执行（看脚本实际调用的Python版本）
+          echo -e "\n===== 追踪依赖检查脚本执行过程 ====="
+          bash -x $CHECK_SCRIPT 2>&1  # -x 显示脚本每一步执行的命令
+          
+          # 【调试7】直接用Python3执行脚本，显示完整报错
+          echo -e "\n===== 用Python3直接执行脚本（完整报错） ====="
+          python3 $CHECK_SCRIPT 2>&1
+
+      ###########################################################################
+      # 步骤3：导入配置 + 强制执行（保留详细日志）
+      ###########################################################################
+      - name: 3. 导入配置 + 强制执行（显示配置过程）
+        run: |
+          cd istoreos-src
+          wget -O .config https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/XGP.config
+          
+          # 【调试8】设置FORCE=1并显示环境变量
+          echo -e "\n===== 当前环境变量（确认FORCE=1） ====="
+          export FORCE=1
+          echo "FORCE: $FORCE"
+          
+          # 关闭静默，显示make defconfig的完整输出
+          echo -e "\n===== 生成配置（完整日志） ====="
+          make defconfig FORCE=1 2>&1
+
+      ###########################################################################
+      # 步骤4：后续步骤（保留详细日志，方便排查）
+      ###########################################################################
+      - name: 4. 固件自定义 + 编译（详细日志）
+        run: |
+          cd istoreos-src
+          export FORCE=1
+          
+          # 自定义脚本步骤（保留输出）
           mkdir -p files/etc/init.d/
           cat > files/etc/init.d/auto-5g-wifi << 'EOF'
           #!/bin/sh /etc/rc.common
           START=99
           STOP=10
-
-          start_5g() {
-            echo "启动5G模块..."
-            if [ ! -e /dev/cdc-wdm0 ]; then
-              echo "5G设备节点不存在，检查驱动是否加载"
-              return 1
-            fi
-            uqmi -d /dev/cdc-wdm0 --start-network cmnet --autoconnect
-            sleep 5
-            if uqmi -d /dev/cdc-wdm0 --get-data-status | grep "connected"; then
-              echo "5G启动成功"
-            else
-              echo "重试5G连接..."
-              uqmi -d /dev/cdc-wdm0 --stop-network --autoconnect
-              sleep 3
-              uqmi -d /dev/cdc-wdm0 --start-network cmnet --autoconnect
-            fi
-          }
-
-          start_wifi_hotspot() {
-            echo "开启WiFi热点..."
-            uci set wireless.radio0.disabled=0
-            uci set wireless.@wifi-iface[0].ssid="${WIFI_SSID}"
-            uci set wireless.@wifi-iface[0].key="${WIFI_PASSWORD}"
-            uci set wireless.@wifi-iface[0].mode=ap
-            uci set wireless.@wifi-iface[0].network=lan
-            uci set wireless.@wifi-iface[0].encryption=psk2
-            uci commit wireless
-            /etc/init.d/network restart
-            echo "WiFi热点启动成功：${WIFI_SSID}"
-          }
-
-          start() {
-            start_5g
-            start_wifi_hotspot
-          }
-
-          stop() {
-            echo "停止5G和WiFi..."
-            uqmi -d /dev/cdc-wdm0 --stop-network --autoconnect
-            uci set wireless.radio0.disabled=1
-            uci commit wireless
-            /etc/init.d/network restart
-          }
+          start_5g() { echo "启动5G"; if [ -e /dev/cdc-wdm0 ]; then uqmi -d /dev/cdc-wdm0 --start-network cmnet --autoconnect; fi; }
+          start_wifi_hotspot() { uci set wireless.radio0.disabled=0; uci set wireless.@wifi-iface[0].ssid="${WIFI_SSID}"; uci set wireless.@wifi-iface[0].key="${WIFI_PASSWORD}"; uci commit wireless; /etc/init.d/network restart; }
+          start() { start_5g; start_wifi_hotspot; }
+          stop() { uqmi -d /dev/cdc-wdm0 --stop-network --autoconnect; }
           EOF
-
-          sed -i "s|\${WIFI_SSID}|${{ github.event.inputs.wifi_ssid }}|g" \
-            files/etc/init.d/auto-5g-wifi
-          sed -i "s|\${WIFI_PASSWORD}|${{ github.event.inputs.wifi_password }}|g" \
-            files/etc/init.d/auto-5g-wifi
-
+          sed -i "s|\${WIFI_SSID}|${{ github.event.inputs.wifi_ssid }}|g" files/etc/init.d/auto-5g-wifi
+          sed -i "s|\${WIFI_PASSWORD}|${{ github.event.inputs.wifi_password }}|g" files/etc/init.d/auto-5g-wifi
           chmod +x files/etc/init.d/auto-5g-wifi
           echo "/etc/init.d/auto-5g-wifi start" >> files/etc/rc.local
-
-          # 补充依赖包配置 + 强制生成
           echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
           echo "CONFIG_PACKAGE_uqmi=y" >> .config
-          echo "CONFIG_PACKAGE_hostapd-common=y" >> .config
-          make defconfig -s FORCE=1 2>/dev/null
+          make defconfig FORCE=1 2>&1
+
+          # 编译（关闭静默，显示完整日志，方便定位报错点）
+          echo -e "\n===== 开始编译（完整日志） ====="
+          make -j2 V=sc FORCE=1 2>&1 | tee build.log  # -j2 减少线程，避免日志刷屏；V=sc 显示详细编译日志
 
       ###########################################################################
-      # 步骤5：编译固件（全局FORCE=1 + 静默模式）
+      # 步骤5：上传所有日志（关键！）
       ###########################################################################
-      - name: 5. 编译固件（终极跳过检查 + 减少日志）
-        run: |
-          cd istoreos-src
-          # 全局FORCE=1 + make参数FORCE=1，双重保险
-          export FORCE=1
-          make -j$(nproc) -s V=s FORCE=1 2>&1 | tee build.log
-          
-          # 输出结果
-          echo "=== 编译结果 ==="
-          if [ -n "$(find bin/targets/ -name "*.img.gz" -o -name "*.bin")" ]; then
-            echo "编译成功！固件路径："
-            find bin/targets/ -name "*.img.gz" -o -name "*.bin"
-          else
-            echo "编译失败，查看日志："
-            cat build.log | tail -50  # 输出最后50行日志，方便排查
-          fi
-
-      ###########################################################################
-      # 步骤6：上传产物（无论成败都上传日志）
-      ###########################################################################
-      - name: 6. 上传固件和日志
+      - name: 5. 上传完整日志和产物
         uses: actions/upload-artifact@v4
         with:
-          name: istoreos-xgp-firmware
+          name: istoreos-xgp-debug-logs
           path: |
-            istoreos-src/bin/targets/**/*.img.gz
-            istoreos-src/bin/targets/**/*.bin
             istoreos-src/build.log
-          retention-days: 7
+            istoreos-src/scripts/check-prereq-build.py  # 上传修改后的脚本，确认Shebang
+            /home/runner/work/_temp/**/*.log  # GitHub Actions的系统日志
+          retention-days: 14  # 日志保留14天，足够排查
