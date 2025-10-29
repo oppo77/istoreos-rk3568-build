@@ -33,18 +33,19 @@ jobs:
     name: Build iStoreOS for xgp (RK35xx)
     runs-on: ubuntu-22.04
     steps:
-      - name: 清理空间与安装依赖
+      - name: 清理空间与安装依赖（用apt-get消除警告）
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           docker rmi `docker images -q 2>/dev/null` || true
           sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android
-          sudo apt update -qq
-          sudo apt -y purge azure-cli* docker* ghc* zulu* llvm* firefox google*
-          sudo apt -y install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3 python3-pip rsync subversion swig unzip zlib1g-dev device-tree-compiler liblz4-tool curl wget
+          # 替换apt为apt-get（稳定CLI接口）
+          sudo apt-get update -qq
+          sudo apt-get -y purge azure-cli* docker* ghc* zulu* llvm* firefox google*
+          sudo apt-get -y install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3 python3-pip rsync subversion swig unzip zlib1g-dev device-tree-compiler liblz4-tool curl wget
           sudo pip3 install pyelftools
-          sudo apt autoremove --purge -y
-          sudo apt clean -y
+          sudo apt-get -y autoremove --purge
+          sudo apt-get clean
           sudo timedatectl set-timezone "Asia/Shanghai"
 
       - name: 释放更多磁盘空间
@@ -78,9 +79,7 @@ jobs:
       - name: 初始化feeds并删除问题包（核心步骤）
         run: |
           cd openwrt
-          # 1. 先更新feeds索引（获取完整包列表）
           ./scripts/feeds update -a
-          # 2. 从feeds源头删除luci-app-baidupcs-web（覆盖所有可能路径）
           if [ -d "feeds/third/luci-app-baidupcs-web" ]; then
             rm -rf feeds/third/luci-app-baidupcs-web
             echo "已删除feeds/third中的luci-app-baidupcs-web"
@@ -89,10 +88,8 @@ jobs:
             rm -rf package/feeds/third/luci-app-baidupcs-web
             echo "已删除package/feeds/third中的luci-app-baidupcs-web"
           fi
-          # 3. 删除依赖的baidupcs-web（若存在）
           rm -rf feeds/third/baidupcs-web 2>/dev/null || true
           rm -rf package/feeds/third/baidupcs-web 2>/dev/null || true
-          # 4. 重新生成feeds索引，确保删除生效
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -101,7 +98,6 @@ jobs:
           cd openwrt
           wget --timeout=30 --tries=3 -O .config "https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp.config"
           [ -s .config ] || { echo "Error: xgp.config is empty!"; exit 1; }
-          # 生成最终编译配置（无问题包干扰）
           make defconfig
 
       - name: 引入5G启动脚本并替换变量
