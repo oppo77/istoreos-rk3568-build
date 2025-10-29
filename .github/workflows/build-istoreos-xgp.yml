@@ -56,6 +56,12 @@ jobs:
           large-packages: true
           swap-storage: true
 
+      - name: Checkout config files (分离的配置文件)
+        uses: actions/checkout@v4
+        with:
+          path: config-repo  # 拉取包含config-files的仓库到config-repo目录
+          fetch-depth: 1
+
       - name: Clone iStoreOS source
         uses: actions/checkout@v4
         with:
@@ -71,86 +77,29 @@ jobs:
           [ -s .config ] || { echo "Error: xgp.config is empty!"; exit 1; }
           echo "✅ xgp.config downloaded successfully"
 
-      - name: Configure 5G auto-start
+      - name: 引入5G启动脚本并替换变量
         run: |
+          # 创建目标目录
           mkdir -p openwrt/files/etc/init.d/
-          cat > openwrt/files/etc/init.d/5g-auto << 'EOF'
-#!/bin/sh /etc/rc.common
-START=95
-STOP=05
-
-5G_APN="${5G_APN:-cmnet}"
-
-start() {
-    echo "[5G-AUTO] Starting 5G module..."
-    for i in $(seq 1 30); do
-        if ip link show wwan0 > /dev/null 2>&1; then
-            echo "[5G-AUTO] WWAN interface (wwan0) ready"
-            break
-        fi
-        sleep 1
-    done
-    [ ! -x /usr/bin/uqmi ] && { echo "[5G-AUTO] uqmi not found!"; return 1; }
-    uqmi -d /dev/cdc-wdm0 --reset-device > /dev/null 2>&1
-    sleep 3
-    uqmi -d /dev/cdc-wdm0 --set-apn "$5G_APN" > /dev/null 2>&1
-    uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect > /dev/null 2>&1
-    sleep 5
-    if uqmi -d /dev/cdc-wdm0 --get-data-status | grep -q "connected"; then
-        echo "[5G-AUTO] 5G module started successfully"
-    else
-        echo "[5G-AUTO] Retry starting 5G..."
-        uqmi -d /dev/cdc-wdm0 --stop-network > /dev/null 2>&1
-        sleep 2
-        uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect > /dev/null 2>&1
-    fi
-}
-
-stop() {
-    echo "[5G-AUTO] Stopping 5G module..."
-    [ -x /usr/bin/uqmi ] && uqmi -d /dev/cdc-wdm0 --stop-network > /dev/null 2>&1
-}
-EOF
+          # 复制外部5G脚本到源码目录
+          cp config-repo/config-files/5g-auto openwrt/files/etc/init.d/
+          # 替换脚本中的APN占位符
+          sed -i "s/__5G_APN__/${{ github.event.inputs.5g_apn }}/g" openwrt/files/etc/init.d/5g-auto
+          # 设置权限+开机启动
           chmod 755 openwrt/files/etc/init.d/5g-auto
           mkdir -p openwrt/files/etc/rc.d/
           ln -sf ../init.d/5g-auto openwrt/files/etc/rc.d/S955g-auto
-          echo "5G_APN=${{ github.event.inputs.5g_apn }}" >> openwrt/files/etc/profile
 
-      - name: Configure WiFi auto-start
+      - name: 引入WiFi配置并替换变量
         run: |
+          # 创建目标目录
           mkdir -p openwrt/files/etc/config/
-          cat > openwrt/files/etc/config/wireless << EOF
-config wifi-device 'radio0'
-    option type 'mac80211'
-    option path 'platform/soc/fe300000.mmci/mmc_host/mmc1/mmc1:0001/mmc1:0001:1'
-    option channel '6'
-    option band '2g'
-    option htmode 'HT20'
-    option country 'CN'
-    option disabled '0'
-config wifi-iface 'default_radio0'
-    option device 'radio0'
-    option network 'lan'
-    option mode 'ap'
-    option ssid '${{ github.event.inputs.wifi_2g_ssid }}'
-    option encryption 'psk2'
-    option key '${{ github.event.inputs.wifi_password }}'
-config wifi-device 'radio1'
-    option type 'mac80211'
-    option path 'platform/soc/fe300000.mmci/mmc_host/mmc2/mmc2:0001/mmc2:0001:1'
-    option channel '36'
-    option band '5g'
-    option htmode 'VHT80'
-    option country 'CN'
-    option disabled '0'
-config wifi-iface 'default_radio1'
-    option device 'radio1'
-    option network 'lan'
-    option mode 'ap'
-    option ssid '${{ github.event.inputs.wifi_5g_ssid }}'
-    option encryption 'psk2'
-    option key '${{ github.event.inputs.wifi_password }}'
-EOF
+          # 复制外部WiFi配置到源码目录
+          cp config-repo/config-files/wireless openwrt/files/etc/config/
+          # 替换WiFi配置中的占位符
+          sed -i "s/__WIFI_2G_SSID__/${{ github.event.inputs.wifi_2g_ssid }}/g" openwrt/files/etc/config/wireless
+          sed -i "s/__WIFI_5G_SSID__/${{ github.event.inputs.wifi_5g_ssid }}/g" openwrt/files/etc/config/wireless
+          sed -i "s/__WIFI_PASSWORD__/${{ github.event.inputs.wifi_password }}/g" openwrt/files/etc/config/wireless
 
       - name: Set LAN IP address
         run: |
