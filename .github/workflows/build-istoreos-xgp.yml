@@ -1,18 +1,18 @@
-name: iStoreOS-xgp-CI
+name: iStoreOS-xgp-AutoBuild
 
 on:
   workflow_dispatch:
     inputs:
       lan_ip:
-        description: 'LAN管理IP地址'
+        description: '路由器管理IP（LAN地址）'
         required: true
         default: '192.168.10.1'
-      wifi_ssid_2g:
-        description: '2.4G WiFi名称'
+      wifi_2g_ssid:
+        description: '2.4G WiFi热点名称'
         required: true
         default: 'xgp-WiFi-2.4G'
-      wifi_ssid_5g:
-        description: '5G WiFi名称'
+      wifi_5g_ssid:
+        description: '5G WiFi热点名称'
         required: true
         default: 'xgp-WiFi-5G'
       wifi_password:
@@ -20,63 +20,45 @@ on:
         required: true
         default: 'xgp123456'
       5g_apn:
-        description: '5G模块APN（如cmnet）'
+        description: '5G模块APN（移动cmnet/联通3gnet/电信ctnet）'
         required: true
         default: 'cmnet'
-  # 可选：每日自动编译，注释则关闭
-  # schedule:
-  #   - cron: 0 20 * * *
 
 permissions:
   contents: read
   packages: read
 
 jobs:
-  build_xgp_firmware:
+  build_xgp:
     name: Build iStoreOS for xgp (RK35xx)
     runs-on: ubuntu-22.04
     steps:
-      ###########################################################################
-      # 步骤1：清理空间+初始化编译环境（参考OpenWrt-CI精简风格）
-      ###########################################################################
-      - name: Clean space & Init environment
+      - name: Clean space & Install dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # 清理冗余镜像/软件
           docker rmi `docker images -q 2>/dev/null` || true
-          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android
-          # 安装编译依赖（仅保留iStoreOS必需依赖）
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android
           sudo apt update -qq
-          sudo apt -y purge azure-cli* docker* ghc* zulu* llvm* firefox google* dotnet* powershell* openjdk* mysql* php*
+          sudo apt -y purge azure-cli* docker* ghc* zulu* llvm* firefox google*
           sudo apt -y install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-            gettext git libncurses5-dev libssl-dev python3 python3-pip python3-setuptools \
-            rsync subversion swig unzip zlib1g-dev libelf-dev device-tree-compiler liblz4-tool curl wget
+            gettext git libncurses5-dev libssl-dev python3 python3-pip rsync subversion \
+            swig unzip zlib1g-dev device-tree-compiler liblz4-tool curl wget
           sudo pip3 install pyelftools
-          # 清理缓存+设置时区
           sudo apt autoremove --purge -y
           sudo apt clean -y
           sudo timedatectl set-timezone "Asia/Shanghai"
-          # 显示系统信息
-          echo -e "CPU核心数: $(nproc)\n内存信息: $(free -h | grep Mem | awk '{print $2}')\n磁盘信息: $(df -h / | grep / | awk '{print $4}')"
 
-      ###########################################################################
-      # 步骤2：释放更多磁盘空间（复用OpenWrt-CI的空间清理工具）
-      ###########################################################################
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: true
           android: true
           dotnet: true
-          haskell: true
           large-packages: true
           swap-storage: true
 
-      ###########################################################################
-      # 步骤3：克隆iStoreOS源码（指定24.10分支）
-      ###########################################################################
-      - name: Checkout iStoreOS source
+      - name: Clone iStoreOS source
         uses: actions/checkout@v4
         with:
           repository: istoreos/istoreos
@@ -84,30 +66,17 @@ jobs:
           path: openwrt
           fetch-depth: 1
 
-      ###########################################################################
-      # 步骤4：下载远程xgp.config配置文件（核心：用户提供的远程配置）
-      ###########################################################################
       - name: Download xgp.config
         run: |
           cd openwrt
-          # 下载远程配置并替换默认.config
           wget --timeout=30 --tries=3 -O .config "https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp.config"
-          # 验证配置文件有效性
-          if [ ! -s .config ]; then
-            echo "Error: xgp.config download failed or empty!"
-            exit 1
-          fi
-          echo "Successfully downloaded xgp.config"
+          [ -s .config ] || { echo "Error: xgp.config is empty!"; exit 1; }
+          echo "✅ xgp.config downloaded successfully"
 
-      ###########################################################################
-      # 步骤5：配置5G自动启动脚本（开机启动）
-      ###########################################################################
-      - name: Add 5G auto-start script
+      - name: Configure 5G auto-start
         run: |
-          # 创建脚本目录
           mkdir -p openwrt/files/etc/init.d/
-          # 写入5G启动脚本
-          cat > openwrt/files/etc/init.d/qmodem-auto << 'EOF'
+          cat > openwrt/files/etc/init.d/5g-auto << 'EOF'
 #!/bin/sh /etc/rc.common
 START=95
 STOP=05
@@ -115,38 +84,43 @@ STOP=05
 5G_APN="${5G_APN:-cmnet}"
 
 start() {
-    # 等待WWAN接口
+    echo "[5G-AUTO] Starting 5G module..."
     for i in $(seq 1 30); do
-        [ -d /sys/class/net/wwan0 ] && break
+        if ip link show wwan0 > /dev/null 2>&1; then
+            echo "[5G-AUTO] WWAN interface (wwan0) ready"
+            break
+        fi
         sleep 1
     done
-    # 启动5G连接
-    [ -x /usr/bin/uqmi ] && {
-        uqmi -d /dev/cdc-wdm0 --reset-device
-        sleep 3
-        uqmi -d /dev/cdc-wdm0 --set-apn "$5G_APN"
-        uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect
-    }
+    [ ! -x /usr/bin/uqmi ] && { echo "[5G-AUTO] uqmi not found!"; return 1; }
+    uqmi -d /dev/cdc-wdm0 --reset-device > /dev/null 2>&1
+    sleep 3
+    uqmi -d /dev/cdc-wdm0 --set-apn "$5G_APN" > /dev/null 2>&1
+    uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect > /dev/null 2>&1
+    sleep 5
+    if uqmi -d /dev/cdc-wdm0 --get-data-status | grep -q "connected"; then
+        echo "[5G-AUTO] 5G module started successfully"
+    else
+        echo "[5G-AUTO] Retry starting 5G..."
+        uqmi -d /dev/cdc-wdm0 --stop-network > /dev/null 2>&1
+        sleep 2
+        uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect > /dev/null 2>&1
+    fi
 }
 
 stop() {
-    [ -x /usr/bin/uqmi ] && uqmi -d /dev/cdc-wdm0 --stop-network
+    echo "[5G-AUTO] Stopping 5G module..."
+    [ -x /usr/bin/uqmi ] && uqmi -d /dev/cdc-wdm0 --stop-network > /dev/null 2>&1
 }
 EOF
-          # 设置权限+开机启动
-          chmod 755 openwrt/files/etc/init.d/qmodem-auto
-          ln -sf ../init.d/qmodem-auto openwrt/files/etc/rc.d/S95qmodem-auto
-          # 写入APN到环境变量
+          chmod 755 openwrt/files/etc/init.d/5g-auto
+          mkdir -p openwrt/files/etc/rc.d/
+          ln -sf ../init.d/5g-auto openwrt/files/etc/rc.d/S955g-auto
           echo "5G_APN=${{ github.event.inputs.5g_apn }}" >> openwrt/files/etc/profile
 
-      ###########################################################################
-      # 步骤6：配置WiFi热点自动开启（2.4G+5G）
-      ###########################################################################
       - name: Configure WiFi auto-start
         run: |
-          # 创建WiFi配置目录
           mkdir -p openwrt/files/etc/config/
-          # 写入WiFi配置（适配MT7921）
           cat > openwrt/files/etc/config/wireless << EOF
 config wifi-device 'radio0'
     option type 'mac80211'
@@ -161,7 +135,7 @@ config wifi-iface 'default_radio0'
     option device 'radio0'
     option network 'lan'
     option mode 'ap'
-    option ssid '${{ github.event.inputs.wifi_ssid_2g }}'
+    option ssid '${{ github.event.inputs.wifi_2g_ssid }}'
     option encryption 'psk2'
     option key '${{ github.event.inputs.wifi_password }}'
 
@@ -178,89 +152,46 @@ config wifi-iface 'default_radio1'
     option device 'radio1'
     option network 'lan'
     option mode 'ap'
-    option ssid '${{ github.event.inputs.wifi_ssid_5g }}'
+    option ssid '${{ github.event.inputs.wifi_5g_ssid }}'
     option encryption 'psk2'
     option key '${{ github.event.inputs.wifi_password }}'
 EOF
 
-      ###########################################################################
-      # 步骤7：设置LAN管理IP（替换默认192.168.1.1）
-      ###########################################################################
       - name: Set LAN IP address
         run: |
           cd openwrt
           sed -i "s/192\.168\.[0-9]*\.[0-9]*/${{ github.event.inputs.lan_ip }}/g" package/base-files/files/bin/config_generate
-          echo "Set LAN IP to ${{ github.event.inputs.lan_ip }}"
+          echo "✅ LAN IP set to ${{ github.event.inputs.lan_ip }}"
 
-      ###########################################################################
-      # 步骤8：更新feeds+安装依赖包（参考OpenWrt-CI标准流程）
-      ###########################################################################
       - name: Update & install feeds
         run: |
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      ###########################################################################
-      # 步骤9：生成配置+下载编译依赖
-      ###########################################################################
       - name: Generate config & Download packages
         run: |
           cd openwrt
           make defconfig
-          # 多线程下载依赖（16线程足够，避免资源耗尽）
           make download -j16
-          # 清理损坏的小文件
           find dl -size -1024c -exec rm -f {} \;
 
-      ###########################################################################
-      # 步骤10：编译固件（失败后单线程调试）
-      ###########################################################################
       - name: Compile firmware
         run: |
           cd openwrt
-          echo "Start compile with $(nproc) threads"
-          # 多线程编译，失败则单线程显示详细日志
+          echo "✅ Starting compile with $(nproc) threads"
           make -j$(nproc) || make -j1 V=s
-          # 显示空间占用（排查编译问题用）
-          echo -e "\n===== Space Usage ====="
-          df -h
-          du -h --max-depth=1 ./bin/targets/
+          echo -e "\n✅ Firmware directory size:"
+          du -h --max-depth=1 ./bin/targets/rockchip/armv8/
 
-      ###########################################################################
-      # 步骤11：整理编译产物（参考OpenWrt-CI的artifact结构）
-      ###########################################################################
-      - name: Prepare artifacts
+      - name: Organize firmware
         run: |
-          # 创建产物目录
-          mkdir -p ./artifact/firmware ./artifact/buildinfo ./artifact/package
-          # 复制固件（RK35xx目标目录）
-          cp -rf openwrt/bin/targets/rockchip/armv8/* ./artifact/firmware/
-          # 复制buildinfo/manifest
-          cp -rf openwrt/bin/targets/*/*/*.buildinfo ./artifact/buildinfo/
-          cp -rf openwrt/bin/targets/*/*/*.manifest ./artifact/buildinfo/
-          # 复制IPK包
-          cp -rf openwrt/bin/packages/*/*/*.ipk ./artifact/package/
-          # 清理冗余packages目录
-          rm -rf ./artifact/firmware/packages
+          mkdir -p ./final-firmware
+          cp -rf openwrt/bin/targets/rockchip/armv8/* ./final-firmware/
+          rm -rf ./final-firmware/packages
 
-      ###########################################################################
-      # 步骤12：上传产物到Artifact（分三类，方便获取）
-      ###########################################################################
-      - name: Upload firmware (核心产物)
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: iStoreOS-xgp-firmware-${{ github.run_id }}
-          path: ./artifact/firmware/
-
-      - name: Upload buildinfo
-        uses: actions/upload-artifact@v4
-        with:
-          name: iStoreOS-xgp-buildinfo-${{ github.run_id }}
-          path: ./artifact/buildinfo/
-
-      - name: Upload IPK packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: iStoreOS-xgp-packages-${{ github.run_id }}
-          path: ./artifact/package/
+          name: iStoreOS-xgp-Firmware-${{ github.run_id }}
+          path: ./final-firmware/
