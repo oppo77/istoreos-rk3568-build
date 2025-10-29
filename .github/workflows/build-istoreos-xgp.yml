@@ -109,29 +109,30 @@ jobs:
           mixkey: ${{ runner.os }}-${{ matrix.ARCHITECTURE }}-${{ env.REPO_BRANCH }}
           prefix: ${{ github.workspace }}/openwrt
 
-      # 【第142行错误修复】规范wget命令格式，变量引用+引号包裹
+      # 【第141行错误彻底修复】统一缩进+移除多余空格+简化命令
       - name: 下载远程xgp.config配置文件
         run: |
+          # 所有命令严格缩进2空格（与run字段对齐后再缩进2空格）
           echo "开始从URL下载配置文件：${{ env.XGP_CONFIG_URL }}"
-          # 修复：使用双引号包裹路径，确保变量正确解析
-          wget_output_path="${{ github.workspace }}/xgp.config"
-          if ! wget --timeout=30 --tries=3 -O "$wget_output_path" "${{ env.XGP_CONFIG_URL }}"; then
-            echo "错误：下载xgp.config失败，请检查URL是否有效！"
+          # 定义输出路径（避免长变量嵌套）
+          wget_out="${{ github.workspace }}/xgp.config"
+          # wget命令：双引号包裹所有变量，避免特殊字符解析错误
+          if ! wget --timeout=30 --tries=3 -O "$wget_out" "${{ env.XGP_CONFIG_URL }}"; then
+            echo "错误：下载xgp.config失败！请检查URL有效性"
             exit 1
           fi
-          # 检查文件非空
-          if [ ! -s "$wget_output_path" ]; then
+          # 检查文件非空（避免下载到空文件）
+          if [ ! -s "$wget_out" ]; then
             echo "错误：下载的xgp.config为空文件！"
             exit 1
           fi
-          # 打印文件大小（验证下载成功）
-          file_size=$(du -h "$wget_output_path" | awk '{print $1}')
-          echo "✅ 成功下载xgp.config（文件大小：$file_size）"
+          # 打印文件信息（验证下载成功）
+          echo "✅ 成功下载xgp.config（大小：$(du -h "$wget_out" | awk '{print $1}')）"
 
       - name: 复制配置文件到编译目录
         run: |
           cp ${{ github.workspace }}/xgp.config ${{ github.workspace }}/openwrt/${{ env.TARGET_CONFIG_FILE }}
-          echo "✅ 已将xgp.config复制为${{ env.TARGET_CONFIG_FILE }}"
+          echo "✅ 已将xgp.config复制为编译用${{ env.TARGET_CONFIG_FILE }}"
 
       - name: 添加5G自动启动脚本
         run: |
