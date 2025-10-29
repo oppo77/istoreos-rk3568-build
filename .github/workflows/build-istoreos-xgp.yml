@@ -41,7 +41,6 @@ jobs:
           sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android
           sudo apt-get update -qq
           sudo apt-get -y purge azure-cli* docker* ghc* zulu* llvm* firefox google*
-          # 额外安装多线程下载工具axel
           sudo apt-get -y install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3 python3-pip rsync subversion swig unzip zlib1g-dev device-tree-compiler liblz4-tool curl wget axel
           sudo pip3 install pyelftools
           sudo apt-get -y autoremove --purge
@@ -71,24 +70,25 @@ jobs:
           path: openwrt
           fetch-depth: 1
 
-      - name: 配置多镜像源冗余（加速make download）
+      - name: 配置多镜像源（修正格式错误）
         run: |
           cd openwrt
-          # 替换OpenWrt官方源为多镜像冗余（国外服务器访问国内/国际镜像均优）
-          # 顺序：清华（国内）→ 中科大（国内）→ 官方（国际）
-          sed -i 's#downloads.openwrt.org#mirrors.tuna.tsinghua.edu.cn/openwrt\|mirrors.ustc.edu.cn/openwrt\|downloads.openwrt.org#g' ./feeds.conf.default
-          # 替换package源码中的下载链接（覆盖更多包）
-          find ./package -type f -name "Makefile" -exec sed -i 's#https://downloads.openwrt.org#https://mirrors.tuna.tsinghua.edu.cn/openwrt#g' {} \;
-          find ./package -type f -name "Makefile" -exec sed -i 's#http://downloads.openwrt.org#https://mirrors.tuna.tsinghua.edu.cn/openwrt#g' {} \;
+          # 替换OpenWrt官方源为清华镜像（国外服务器访问稳定）
+          sed -i 's#downloads.openwrt.org#mirrors.tuna.tsinghua.edu.cn/openwrt#g' ./feeds.conf.default
+          # 为下载逻辑添加多镜像重试（修改download.mk）
+          echo 'MIRRORS += https://mirrors.ustc.edu.cn/openwrt' >> ./include/download.mk
+          echo 'MIRRORS += https://downloads.openwrt.org' >> ./include/download.mk
+          # 替换package中的硬编码链接
+          find ./package -type f -name "Makefile" -exec sed -i 's#https://downloads.openwrt.org#$(MIRRORS)#g' {} \;
 
-      - name: 替换下载工具为多线程axel（核心加速）
+      - name: 替换下载工具为多线程axel
         run: |
           cd openwrt
-          # 修改OpenWrt下载脚本，用axel替代wget（支持多线程）
-          sudo sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 16 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' ./include/download.mk
-          # 增加超时和重试机制
-          echo "DOWNLOAD_TIMEOUT=600" >> ./include/download.mk  # 超时10分钟
-          echo "DOWNLOAD_RETRIES=5" >> ./include/download.mk     # 重试5次
+          # 修改下载命令为axel（16线程）
+          sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 16 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' ./include/download.mk
+          # 增加超时和重试
+          echo "DOWNLOAD_TIMEOUT=600" >> ./include/download.mk
+          echo "DOWNLOAD_RETRIES=5" >> ./include/download.mk
 
       - name: 初始化feeds并删除问题包
         run: |
@@ -122,20 +122,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-xgp-dl-
 
-      - name: 多线程加速下载依赖包（make download）
+      - name: 多线程加速下载依赖包（修复缺失包检查）
         run: |
           cd openwrt
           echo "使用16线程axel加速下载依赖包..."
-          make download -j16  # 配合axel的16线程，最大化带宽利用
-          # 清理损坏的小文件（避免编译失败）
-          find dl -size -1024c -exec rm -f {} \;
-          # 检查是否有未下载成功的包，手动重试
-          for file in $(cat dl/.downloaded); do
-            if [ ! -f "dl/$file" ]; then
-              echo "重新下载缺失的包: $file"
-              make download V=s | grep "$file"  # 单独重试缺失包
-            fi
-          done
+          # 首次下载，依赖axel和多镜像重试机制
+          make download -j16 || make download -j1 V=s  # 失败时单线程输出详细日志
 
       - name: 引入5G启动脚本并替换变量
         run: |
