@@ -1,0 +1,35 @@
+#!/bin/sh /etc/rc.common
+START=95
+STOP=05
+
+5G_APN="${__5G_APN__}"  # 占位符，工作流中替换为实际APN
+
+start() {
+    echo "[5G-AUTO] Starting 5G module..."
+    for i in $(seq 1 30); do
+        if ip link show wwan0 > /dev/null 2>&1; then
+            echo "[5G-AUTO] WWAN interface (wwan0) ready"
+            break
+        fi
+        sleep 1
+    done
+    [ ! -x /usr/bin/uqmi ] && { echo "[5G-AUTO] uqmi not found!"; return 1; }
+    uqmi -d /dev/cdc-wdm0 --reset-device > /dev/null 2>&1
+    sleep 3
+    uqmi -d /dev/cdc-wdm0 --set-apn "$5G_APN" > /dev/null 2>&1
+    uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect > /dev/null 2>&1
+    sleep 5
+    if uqmi -d /dev/cdc-wdm0 --get-data-status | grep -q "connected"; then
+        echo "[5G-AUTO] 5G module started successfully"
+    else
+        echo "[5G-AUTO] Retry starting 5G..."
+        uqmi -d /dev/cdc-wdm0 --stop-network > /dev/null 2>&1
+        sleep 2
+        uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect > /dev/null 2>&1
+    fi
+}
+
+stop() {
+    echo "[5G-AUTO] Stopping 5G module..."
+    [ -x /usr/bin/uqmi ] && uqmi -d /dev/cdc-wdm0 --stop-network > /dev/null 2>&1
+}
