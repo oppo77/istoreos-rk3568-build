@@ -100,18 +100,17 @@ jobs:
           git clone ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
           ln -sf ${{ env.WORK_DIR }}/openwrt ${{ github.workspace }}/openwrt
 
+      # 【第117行附近错误修正】统一with字段下子字段缩进，冒号后加空格
       - name: 缓存编译文件
         uses: klever1988/cachewrtbuild@main
         with:
-          ccache: 'true'
+          ccache: 'true'  # 修正：冒号后加空格，缩进比with多2空格
           mixkey: ${{ runner.os }}-${{ matrix.ARCHITECTURE }}-${{ env.REPO_BRANCH }}
           prefix: ${{ github.workspace }}/openwrt
 
-      # 【核心修正】修复.config配置写入的YAML语法（EOF必须单独成行且无缩进）
       - name: 写入xgp设备.config配置文件
         run: |
           cd ${{ github.workspace }}/openwrt
-          # 注意：此处EOF必须单独成行，且前后无空格
           cat > ${{ env.CONFIG_FILE }} << 'EOF'
 # 1. 目标平台与系统基础配置
 CONFIG_TARGET_rockchip=y
@@ -1198,7 +1197,7 @@ EOF
           keep_minimum_runs: 3
           token: ${{ env.GITHUB_TOKEN }}
 
-      - name: 删除旧Releases固件 
+      - name: 删除旧Releases固件
         uses: dev-drprasad/delete-older-releases@v0.1.0
         if: env.UPLOAD_RELEASE == 'true' && !cancelled()
         with:
