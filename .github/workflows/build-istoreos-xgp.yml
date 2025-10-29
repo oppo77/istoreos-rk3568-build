@@ -25,45 +25,39 @@ on:
         required: true
         default: 'xgp123456'
       5g_apn:
-        description: '5G模块APN（根据运营商填写，如移动cmnet、联通3gnet）'
+        description: '5G模块APN（移动cmnet、联通3gnet、电信ctnet）'
         required: true
         default: 'cmnet'
       ssh:
         description: 'SSH连接调试（临时开启）'
         required: false
         default: 'false'
-  # schedule:
-  #  - cron: 0 16 * * *  # 可选：每日自动编译，注释后关闭
 
 env:
-  REPO_URL: https://github.com/istoreos/istoreos  # iStoreOS 源码地址
-  REPO_BRANCH: istoreos-24.10                    # 编译分支（固定24.10）
-  FEEDS_CONF: feeds.conf                         # feeds配置文件名
-  CONFIG_FILE: .config                           # 设备配置文件名
-  WORK_DIR: /mnt/workdir                         # 工作目录
-  UPLOAD_BIN_DIR: true                           # 上传bin文件夹（含中间文件）
-  UPLOAD_FIRMWARE: true                          # 上传最终固件
-  UPLOAD_RELEASE: true                           # 发布固件到Releases
-  TZ: Asia/Shanghai                              # 时区
-  GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN }}      # 仓库访问Token（需提前配置）
+  REPO_URL: https://github.com/istoreos/istoreos
+  REPO_BRANCH: istoreos-24.10
+  FEEDS_CONF: feeds.conf
+  CONFIG_FILE: .config
+  WORK_DIR: /mnt/workdir
+  UPLOAD_BIN_DIR: true
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+  GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN }}
 
 jobs:
   build-xgp-firmware:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        # 仅保留xgp设备对应的RK35xx架构，避免无效编译
         ARCHITECTURE: [rk35xx-24.10]
-      fail-fast: false  # 单个任务失败不终止其他任务（此处仅一个任务）
+      fail-fast: false
 
     steps:
-      ###########################################################################
-      # 步骤1：基础准备（检查环境、安装依赖）
-      ###########################################################################
       - name: 拉取工作流代码
         uses: actions/checkout@main
 
-      - name: 检查服务器配置（避免性能不足导致编译失败）
+      - name: 检查服务器配置
         run: |
           echo "⚠️ 若服务器CPU/内存不足，建议立即取消任务重新运行！"
           echo -e "\n------------------------------- CPU信息 -------------------------------"
@@ -74,63 +68,50 @@ jobs:
           echo -e "\n------------------------------- 磁盘信息 -------------------------------"
           df -Th
 
-      - name: 安装编译依赖（Go、Python库等）
+      - name: 安装编译依赖
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # 清理旧依赖
           sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
-          # 更新源并安装依赖（基于iStoreOS编译需求）
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libssl-dev python3 python3-pip python3-setuptools python3-venv \
             rsync subversion swig unzip zlib1g-dev libelf-dev libglib2.0-dev libfdt-dev libpixman-1-dev \
             qemu-system-arm qemu-utils device-tree-compiler liblz4-tool curl wget
-          # 安装Python依赖
           sudo pip3 install pyelftools
-          # 清理Docker镜像（释放磁盘空间）
           docker rmi `docker images -q 2>/dev/null` || true
           docker image prune -a -f
-          # 清理冗余软件
           sudo -E apt-get -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell \
             openjdk* adoptopenjdk* mysql* php* mongodb* dotnet* moby* snapd* android* 2>/dev/null || true
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
-          # 设置时区
           sudo timedatectl set-timezone "$TZ"
-          # 创建工作目录并授权
           sudo mkdir -p $WORK_DIR
           sudo chown $USER:$GROUPS $WORK_DIR
 
-      - name: 安装Go 1.21.1（iStoreOS编译依赖）
+      - name: 安装Go 1.21.1
         uses: actions/setup-go@v1
         with:
           go-version: 1.21.1
 
-      ###########################################################################
-      # 步骤2：克隆源码与缓存构建
-      ###########################################################################
       - name: 克隆iStoreOS源码
         working-directory: ${{ env.WORK_DIR }}
         run: |
           git clone ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
-          # 建立软链接，方便后续操作
           ln -sf ${{ env.WORK_DIR }}/openwrt ${{ github.workspace }}/openwrt
 
-      - name: 缓存编译文件（加速二次编译）
+      - name: 缓存编译文件
         uses: klever1988/cachewrtbuild@main
         with:
           ccache: 'true'
           mixkey: ${{ runner.os }}-${{ matrix.ARCHITECTURE }}-${{ env.REPO_BRANCH }}
           prefix: ${{ github.workspace }}/openwrt
 
-      ###########################################################################
-      # 步骤3：加载xgp设备配置（核心配置表）
-      ###########################################################################
+      # 【核心修正】修复.config配置写入的YAML语法（EOF必须单独成行且无缩进）
       - name: 写入xgp设备.config配置文件
         run: |
           cd ${{ github.workspace }}/openwrt
-          # 将提供的xgp配置表写入.config文件（关键步骤）
+          # 注意：此处EOF必须单独成行，且前后无空格
           cat > ${{ env.CONFIG_FILE }} << 'EOF'
 # 1. 目标平台与系统基础配置
 CONFIG_TARGET_rockchip=y
@@ -986,28 +967,18 @@ CONFIG_PACKAGE_kmod-nft-tproxy=y
 CONFIG_PACKAGE_kmod-nlmon=y
 EOF
 
-      ###########################################################################
-      # 步骤4：配置开机自动启动5G模块（基于QModem/uqmi）
-      ###########################################################################
       - name: 添加5G自动启动脚本
         run: |
-          # 创建脚本目录（确保路径存在）
           mkdir -p ${{ github.workspace }}/openwrt/files/etc/init.d/
-          # 写入5G自动启动脚本（使用uqmi工具，适配QModem）
           cat > ${{ github.workspace }}/openwrt/files/etc/init.d/qmodem-auto-start << 'EOF'
 #!/bin/sh /etc/rc.common
-# 5G模块自动启动脚本（xgp设备专用）
+START=95
+STOP=05
 
-START=95  # 启动优先级（95表示较晚启动，确保依赖服务就绪）
-STOP=05   # 停止优先级
-
-# 读取环境变量中的APN（编译时通过workflow传入）
 5G_APN="${5G_APN:-cmnet}"
 
 start() {
     echo "===== 开始启动5G模块 ====="
-    
-    # 1. 等待WWAN接口就绪（最多等待30秒）
     for i in $(seq 1 30); do
         if ip link show wwan0 > /dev/null 2>&1; then
             echo "WWAN接口（wwan0）已就绪"
@@ -1017,35 +988,26 @@ start() {
         sleep 1
     done
 
-    # 2. 检查uqmi工具是否存在
     if ! command -v uqmi > /dev/null 2>&1; then
         echo "错误：uqmi工具未安装，无法启动5G模块"
         return 1
     fi
 
-    # 3. 重置5G模块（可选，部分模块需要）
     uqmi -d /dev/cdc-wdm0 --reset-device > /dev/null 2>&1
     sleep 3
-
-    # 4. 设置APN（根据运营商调整，默认cmnet）
     echo "设置5G APN为：$5G_APN"
     uqmi -d /dev/cdc-wdm0 --set-apn "$5G_APN" > /dev/null 2>&1
-
-    # 5. 激活5G数据连接
     echo "激活5G数据连接..."
     uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect > /dev/null 2>&1
     sleep 5
 
-    # 6. 检查连接状态
     CONN_STATUS=$(uqmi -d /dev/cdc-wdm0 --get-data-status | grep "connected" | wc -l)
     if [ $CONN_STATUS -eq 1 ]; then
         echo "5G模块启动成功！"
-        # 获取IP地址并打印
         IP_ADDR=$(uqmi -d /dev/cdc-wdm0 --get-current-settings | grep "ip-family" -A 1 | grep "ip" | awk -F'"' '{print $4}')
         echo "5G分配的IP地址：$IP_ADDR"
     else
         echo "警告：5G模块启动失败，尝试重新激活..."
-        # 重试一次激活
         uqmi -d /dev/cdc-wdm0 --stop-network > /dev/null 2>&1
         sleep 2
         uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect > /dev/null 2>&1
@@ -1057,13 +1019,11 @@ start() {
             echo "错误：5G模块启动失败，请检查模块或APN配置"
         fi
     fi
-
     echo "===== 5G模块启动流程结束 ====="
 }
 
 stop() {
     echo "===== 开始停止5G模块 ====="
-    # 停止5G数据连接
     if command -v uqmi > /dev/null 2>&1 && ip link show wwan0 > /dev/null 2>&1; then
         uqmi -d /dev/cdc-wdm0 --stop-network > /dev/null 2>&1
         echo "5G数据连接已停止"
@@ -1071,71 +1031,57 @@ stop() {
     echo "===== 5G模块停止流程结束 ====="
 }
 EOF
-          # 设置脚本可执行权限
           chmod 755 ${{ github.workspace }}/openwrt/files/etc/init.d/qmodem-auto-start
-          # 配置开机自动启动（通过rc.d软链接）
           mkdir -p ${{ github.workspace }}/openwrt/files/etc/rc.d/
           ln -sf ../init.d/qmodem-auto-start ${{ github.workspace }}/openwrt/files/etc/rc.d/S95qmodem-auto-start
-          # 将APN写入环境变量（脚本启动时读取）
           echo "5G_APN=${{ github.event.inputs.5g_apn }}" >> ${{ github.workspace }}/openwrt/files/etc/profile
 
-      ###########################################################################
-      # 步骤5：配置开机自动开启WiFi热点（MT7921 WiFi6模块）
-      ###########################################################################
       - name: 配置WiFi热点自动开启
         run: |
-          # 1. 创建WiFi配置目录
           mkdir -p ${{ github.workspace }}/openwrt/files/etc/config/
-          # 2. 写入WiFi配置文件（适配MT7921，支持2.4G/5G双频段）
           cat > ${{ github.workspace }}/openwrt/files/etc/config/wireless << EOF
 config wifi-device 'radio0'
     option type 'mac80211'
-    option path 'platform/soc/fe300000.mmci/mmc_host/mmc1/mmc1:0001/mmc1:0001:1'  # 2.4G WiFi路径（MT7921）
-    option channel '6'                                                      # 2.4G信道（1/6/11可选，避免干扰）
-    option band '2g'                                                        # 频段：2.4G
-    option htmode 'HT20'                                                    # 带宽：20MHz（兼容性更好）
-    option country 'CN'                                                     # 国家码（中国）
-    option disabled '0'                                                     # 启用2.4G WiFi
+    option path 'platform/soc/fe300000.mmci/mmc_host/mmc1/mmc1:0001/mmc1:0001:1'
+    option channel '6'
+    option band '2g'
+    option htmode 'HT20'
+    option country 'CN'
+    option disabled '0'
 
 config wifi-iface 'default_radio0'
     option device 'radio0'
     option network 'lan'
-    option mode 'ap'                                                        # 模式：接入点（热点）
-    option ssid '${{ github.event.inputs.wifi_ssid_2g }}'                   # 2.4G热点名称（编译时传入）
-    option encryption 'psk2'                                                # 加密方式：WPA2-PSK
-    option key '${{ github.event.inputs.wifi_password }}'                   # 2.4G热点密码（编译时传入）
+    option mode 'ap'
+    option ssid '${{ github.event.inputs.wifi_ssid_2g }}'
+    option encryption 'psk2'
+    option key '${{ github.event.inputs.wifi_password }}'
 
 config wifi-device 'radio1'
     option type 'mac80211'
-    option path 'platform/soc/fe300000.mmci/mmc_host/mmc2/mmc2:0001/mmc2:0001:1'  # 5G WiFi路径（MT7921）
-    option channel '36'                                                      # 5G信道（36/40/44/48可选，避免干扰）
-    option band '5g'                                                        # 频段：5G
-    option htmode 'VHT80'                                                   # 带宽：80MHz（WiFi6速率更高）
-    option country 'CN'                                                     # 国家码（中国）
-    option disabled '0'                                                     # 启用5G WiFi
+    option path 'platform/soc/fe300000.mmci/mmc_host/mmc2/mmc2:0001/mmc2:0001:1'
+    option channel '36'
+    option band '5g'
+    option htmode 'VHT80'
+    option country 'CN'
+    option disabled '0'
 
 config wifi-iface 'default_radio1'
     option device 'radio1'
     option network 'lan'
-    option mode 'ap'                                                        # 模式：接入点（热点）
-    option ssid '${{ github.event.inputs.wifi_ssid_5g }}'                   # 5G热点名称（编译时传入）
-    option encryption 'psk2'                                                # 加密方式：WPA2-PSK
-    option key '${{ github.event.inputs.wifi_password }}'                   # 5G热点密码（编译时传入）
+    option mode 'ap'
+    option ssid '${{ github.event.inputs.wifi_ssid_5g }}'
+    option encryption 'psk2'
+    option key '${{ github.event.inputs.wifi_password }}'
 EOF
-          # 3. 确保WiFi服务开机启动
           mkdir -p ${{ github.workspace }}/openwrt/files/etc/rc.d/
-          # 启用hostapd和wpa_supplicant服务（热点依赖）
           ln -sf ../init.d/hostapd ${{ github.workspace }}/openwrt/files/etc/rc.d/S90hostapd
           ln -sf ../init.d/wpa_supplicant ${{ github.workspace }}/openwrt/files/etc/rc.d/S90wpa_supplicant
 
-      ###########################################################################
-      # 步骤6：编译前基础配置（LAN IP、系统名称）
-      ###########################################################################
       - name: 设置LAN IP地址（路由器管理地址）
         run: |
           cd ${{ github.workspace }}/openwrt
           SET_IP=${{ github.event.inputs.lan_ip }}
-          # 替换默认LAN IP（原OpenWrt默认192.168.1.1）
           sed -i "s/192\.168\.[0-9]*\.[0-9]*/$SET_IP/g" package/base-files/files/bin/config_generate
           echo "✅ 已设置LAN管理地址：$SET_IP"
 
@@ -1143,29 +1089,21 @@ EOF
         run: |
           cd ${{ github.workspace }}/openwrt
           set_os_name="${{ github.event.inputs.os_name }}"
-          # 替换系统名称（界面显示用）
           sed -i "s/OpenWrt/${set_os_name}/g" package/base-files/files/bin/config_generate
           echo "✅ 已设置系统名称：${set_os_name}"
 
-      ###########################################################################
-      # 步骤7：SSH调试（可选，临时开启）
-      ###########################################################################
       - name: SSH连接调试（临时开启）
         uses: P3TERX/ssh2actions@v1.0.0
         if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh != 'false') || contains(github.event.action, 'ssh')
         env:
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}  # 可选：Telegram通知（需配置密钥）
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
-      ###########################################################################
-      # 步骤8：编译固件（核心步骤）
-      ###########################################################################
-      - name: 下载依赖软件包（加速编译）
+      - name: 下载依赖软件包
         run: |
           cd ${{ github.workspace }}/openwrt
-          make defconfig  # 加载.config配置
-          make download -j$(nproc)  # 多线程下载依赖
-          # 清理损坏的下载文件（避免编译失败）
+          make defconfig
+          make download -j$(nproc)
           find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
           echo "✅ 依赖软件包下载完成"
@@ -1175,21 +1113,16 @@ EOF
         run: |
           cd ${{ github.workspace }}/openwrt
           echo "✅ 开始编译，使用$(nproc)线程"
-          # 首次编译用多线程，失败则用单线程调试
           make -j$(nproc) || make -j1 || make -j1 V=s
-          # 记录编译时间（用于固件命名）
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
           echo "::set-output name=status::success"
           echo "✅ 固件编译完成"
 
-      ###########################################################################
-      # 步骤9：上传与发布固件
-      ###########################################################################
-      - name: 检查磁盘空间（可选，排查问题用）
+      - name: 检查磁盘空间
         if: (!cancelled())
         run: df -hT
 
-      - name: 上传bin文件夹（含中间文件，用于调试）
+      - name: 上传bin文件夹
         uses: actions/upload-artifact@main
         if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
         with:
@@ -1200,16 +1133,13 @@ EOF
         id: organize
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
         run: |
-          # 进入固件输出目录（RK35xx平台固件路径）
           cd ${{ github.workspace }}/openwrt/bin/targets/rockchip/armv8
-          # 删除冗余的packages文件夹（仅保留固件）
           rm -rf packages
-          # 记录固件目录路径
           echo "FIRMWARE=$PWD" >> $GITHUB_ENV
           echo "::set-output name=status::success"
           echo "✅ 固件文件整理完成，路径：$PWD"
 
-      - name: 上传最终固件（Artifact）
+      - name: 上传最终固件
         uses: actions/upload-artifact@main
         if: steps.organize.outputs.status == 'success' && !cancelled()
         with:
@@ -1220,10 +1150,8 @@ EOF
         id: tag
         if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
         run: |
-          # 设置发布标签（架构+日期）
           RELEASE_TAG="xgp-rk35xx-24.10${{ env.FILE_DATE }}"
           echo "::set-output name=release_tag::${RELEASE_TAG}"
-          # 生成发布说明
           touch release.txt
           echo "
           # iStoreOS 固件（xgp 设备专用）
@@ -1260,22 +1188,19 @@ EOF
           tag_name: ${{ steps.tag.outputs.release_tag }}
           body_path: release.txt
           files: ${{ env.FIRMWARE }}/*
-          draft: false  # 直接发布（非草稿）
-          prerelease: false  # 正式版本（非预发布）
+          draft: false
+          prerelease: false
 
-      ###########################################################################
-      # 步骤10：清理冗余记录（避免仓库空间占用过大）
-      ###########################################################################
-      - name: 删除旧工作流记录（保留1天内，最少3条）
+      - name: 删除旧工作流记录
         uses: GitRML/delete-workflow-runs@main
         with:
           retain_days: 1
           keep_minimum_runs: 3
           token: ${{ env.GITHUB_TOKEN }}
 
-      - name: 删除旧Releases固件（保留最新6个）
+      - name: 删除旧Releases固件
         uses: dev-drprasad/delete-older-releases@v0.1.0
         if: env.UPLOAD_RELEASE == 'true' && !cancelled()
         with:
           keep_latest: 6
-          delete_tags: true  #  同时删除对应的标签
+          delete_tags: true
