@@ -1,167 +1,1281 @@
-name: 【终极终极版】XGP-iStoreOS 编译（删除检查脚本）
+name: Build iStoreOS 24.10 for xgp (RK35xx)
 
 on:
+  repository_dispatch:
   workflow_dispatch:
     inputs:
-      wifi_ssid:
-        description: 'WiFi热点名称'
+      lan_ip:
+        description: '设置LAN IP地址（路由器管理地址）'
         required: true
-        default: 'XGP-5G-Hotspot'
+        default: '192.168.10.1'
+      os_name:
+        description: '设置系统名称'
+        required: true
+        default: 'iStore OS (xgp)'
+      wifi_ssid_2g:
+        description: '2.4G WiFi热点名称'
+        required: true
+        default: 'xgp-WiFi-2.4G'
+      wifi_ssid_5g:
+        description: '5G WiFi热点名称'
+        required: true
+        default: 'xgp-WiFi-5G'
       wifi_password:
-        description: 'WiFi密码'
+        description: 'WiFi热点密码（8-63位）'
         required: true
-        default: 'XGP123456'
+        default: 'xgp123456'
+      5g_apn:
+        description: '5G模块APN（根据运营商填写，如移动cmnet、联通3gnet）'
+        required: true
+        default: 'cmnet'
+      ssh:
+        description: 'SSH连接调试（临时开启）'
+        required: false
+        default: 'false'
+  # schedule:
+  #  - cron: 0 16 * * *  # 可选：每日自动编译，注释后关闭
 
 env:
-  REPO_URL: https://github.com/istoreos/istoreos
-  REPO_BRANCH: istoreos-24.10
-  XGP_CONFIG_URL: https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/XGP.config
-  CHECK_SCRIPT_PATH: scripts/check-prereq-build.py  # 依赖检查脚本路径
+  REPO_URL: https://github.com/istoreos/istoreos  # iStoreOS 源码地址
+  REPO_BRANCH: istoreos-24.10                    # 编译分支（固定24.10）
+  FEEDS_CONF: feeds.conf                         # feeds配置文件名
+  CONFIG_FILE: .config                           # 设备配置文件名
+  WORK_DIR: /mnt/workdir                         # 工作目录
+  UPLOAD_BIN_DIR: true                           # 上传bin文件夹（含中间文件）
+  UPLOAD_FIRMWARE: true                          # 上传最终固件
+  UPLOAD_RELEASE: true                           # 发布固件到Releases
+  TZ: Asia/Shanghai                              # 时区
+  GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN }}      # 仓库访问Token（需提前配置）
 
 jobs:
-  build-final-ultimate:
+  build-xgp-firmware:
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        # 仅保留xgp设备对应的RK35xx架构，避免无效编译
+        ARCHITECTURE: [rk35xx-24.10]
+      fail-fast: false  # 单个任务失败不终止其他任务（此处仅一个任务）
+
     steps:
       ###########################################################################
-      # 步骤1：构建可用的 Python3 环境（确保编译时实际能用）
+      # 步骤1：基础准备（检查环境、安装依赖）
       ###########################################################################
-      - name: 1. 安装依赖 + 配置 Python3 环境
+      - name: 拉取工作流代码
+        uses: actions/checkout@main
+
+      - name: 检查服务器配置（避免性能不足导致编译失败）
         run: |
-          # 1. 清理旧环境，避免任何冲突
-          sudo rm -rf /etc/apt/sources.list.d/* /usr/bin/python /usr/bin/python2
-          sudo apt update -qq && sudo apt full-upgrade -yq
+          echo "⚠️ 若服务器CPU/内存不足，建议立即取消任务重新运行！"
+          echo -e "\n------------------------------- CPU信息 -------------------------------"
+          echo "CPU核心数: $(nproc)"
+          echo "CPU型号: $(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c)"
+          echo -e "\n------------------------------- 内存信息 -------------------------------"
+          free -h
+          echo -e "\n------------------------------- 磁盘信息 -------------------------------"
+          df -Th
 
-          # 2. 安装编译必需的所有依赖（含Python3全家桶）
-          sudo apt install -yq \
-            python3 python3-pip python3-distutils python3-setuptools python3-pyelftools \
-            build-essential git libncurses5-dev zlib1g-dev libssl-dev flex bison \
-            rsync wget file which sed grep gcc-multilib g++-multilib device-tree-compiler \
-            subversion unzip p7zip p7zip-full u-boot-tools
-
-          # 3. 创建 Python 软链接（确保编译时能找到 python 命令）
-          sudo ln -s /usr/bin/python3 /usr/bin/python
-          
-          # 4. 终极验证：确认 Python 环境完全可用（编译时需要）
-          echo "=== 最终 Python 环境验证 ==="
-          which python  # 必须输出 /usr/bin/python
-          which python3 # 必须输出 /usr/bin/python3
-          python --version  # 必须是 3.8+（如 Python 3.10.12）
-          python3 --version # 必须和上面一致
-          # 验证编译时需要的 Python 模块
-          python -c "import distutils; print('distutils 可用')"
-          python -c "import setuptools; print('setuptools 可用')"
-          python -c "import elftools; print('pyelftools 可用')"
-          echo "=== Python 环境完全正常，可支持编译 ==="
-
-      ###########################################################################
-      # 步骤2：拉取源码 + 彻底删除依赖检查脚本（核心！）
-      ###########################################################################
-      - name: 2. 拉取源码 + 删除依赖检查脚本
+      - name: 安装编译依赖（Go、Python库等）
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          # 拉取 iStoreOS 源码
-          git clone --depth=1 -b $REPO_BRANCH $REPO_URL istoreos-src
-          cd istoreos-src
+          # 清理旧依赖
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
+          # 更新源并安装依赖（基于iStoreOS编译需求）
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3 python3-pip python3-setuptools python3-venv \
+            rsync subversion swig unzip zlib1g-dev libelf-dev libglib2.0-dev libfdt-dev libpixman-1-dev \
+            qemu-system-arm qemu-utils device-tree-compiler liblz4-tool curl wget
+          # 安装Python依赖
+          sudo pip3 install pyelftools
+          # 清理Docker镜像（释放磁盘空间）
+          docker rmi `docker images -q 2>/dev/null` || true
+          docker image prune -a -f
+          # 清理冗余软件
+          sudo -E apt-get -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell \
+            openjdk* adoptopenjdk* mysql* php* mongodb* dotnet* moby* snapd* android* 2>/dev/null || true
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          # 设置时区
+          sudo timedatectl set-timezone "$TZ"
+          # 创建工作目录并授权
+          sudo mkdir -p $WORK_DIR
+          sudo chown $USER:$GROUPS $WORK_DIR
 
-          # 关键操作：删除依赖检查脚本（让检查步骤彻底消失）
-          if [ -f "$CHECK_SCRIPT_PATH" ]; then
-            sudo rm -f $CHECK_SCRIPT_PATH
-            echo "=== 已成功删除依赖检查脚本：$CHECK_SCRIPT_PATH ==="
-          else
-            echo "=== 依赖检查脚本不存在，无需删除 ==="
-          fi
-
-          # 验证脚本已删除（确保后续不会被调用）
-          if [ ! -f "$CHECK_SCRIPT_PATH" ]; then
-            echo "=== 验证：依赖检查脚本已彻底删除 ==="
-          else
-            echo "=== 错误：依赖检查脚本未删除！ ===" && exit 1
-          fi
-
-      ###########################################################################
-      # 步骤3：导入 XGP 配置 + 自定义 5G/WiFi 功能
-      ###########################################################################
-      - name: 3. 导入配置 + 配置 5G/WiFi 自启动
-        run: |
-          cd istoreos-src
-          # 1. 导入你的 XGP 专属配置
-          wget -q -O .config $XGP_CONFIG_URL
-          echo "=== XGP 配置已导入 ==="
-
-          # 2. 添加 5G+WiFi 自启动脚本
-          mkdir -p files/etc/init.d/
-          cat > files/etc/init.d/auto-5g-wifi << 'EOF'
-          #!/bin/sh /etc/rc.common
-          START=99
-          start_5g() {
-            if [ -e /dev/cdc-wdm0 ]; then
-              uqmi -d /dev/cdc-wdm0 --start-network cmnet --autoconnect
-              sleep 5
-              [ $(uqmi -d /dev/cdc-wdm0 --get-data-status | grep -c "connected") -eq 1 ] && echo "5G启动成功" || echo "5G启动失败"
-            fi
-          }
-          start_wifi() {
-            uci set wireless.radio1.disabled=0
-            uci set wireless.@wifi-iface[0].ssid="${SSID}"
-            uci set wireless.@wifi-iface[0].key="${PWD}"
-            uci set wireless.@wifi-iface[0].mode=ap
-            uci set wireless.@wifi-iface[0].network=lan
-            uci set wireless.@wifi-iface[0].encryption=psk2
-            uci commit wireless && /etc/init.d/network restart && echo "WiFi启动成功"
-          }
-          start() { start_5g; start_wifi; }
-          EOF
-
-          # 注入 WiFi 参数
-          sed -i "s|\${SSID}|${{ github.event.inputs.wifi_ssid }}|g" files/etc/init.d/auto-5g-wifi
-          sed -i "s|\${PWD}|${{ github.event.inputs.wifi_password }}|g" files/etc/init.d/auto-5g-wifi
-          chmod +x files/etc/init.d/auto-5g-wifi
-          echo "/etc/init.d/auto-5g-wifi start" >> files/etc/rc.local
-
-          # 确保 5G/WiFi 依赖包编译进固件
-          echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
-          echo "CONFIG_PACKAGE_uqmi=y" >> .config
-          echo "CONFIG_PACKAGE_hostapd-common=y" >> .config
-          echo "=== 5G/WiFi 配置完成 ==="
-
-      ###########################################################################
-      # 步骤4：编译固件（无检查脚本 + FORCE=1 双重保险）
-      ###########################################################################
-      - name: 4. 编译固件（无检查 + 静默模式）
-        run: |
-          cd istoreos-src
-          # 1. 生成配置：FORCE=1 双重保险（即使有其他隐藏检查也跳过）
-          make defconfig FORCE=1 -s 2>/dev/null
-          echo "=== 配置生成完成（无依赖检查） ==="
-
-          # 2. 下载依赖包（多线程，快速完成）
-          make download -j8 -s 2>/dev/null
-          # 删除不完整的包，避免编译失败
-          find dl -size -1024c -exec rm -f {} \;
-          echo "=== 依赖包下载完成 ==="
-
-          # 3. 编译：FORCE=1 + 静默模式（日志最少，避免中断）
-          echo "=== 开始编译（无任何依赖检查） ==="
-          make -j$(nproc) FORCE=1 -s V=s 2>&1 | tee build.log
-
-          # 检查编译结果
-          FIRMWARE=$(find bin/targets/ -name "*.img.gz" -o -name "*.bin")
-          if [ -n "$FIRMWARE" ]; then
-            echo -e "\n=== 编译成功！固件路径： ==="
-            echo "$FIRMWARE"
-          else
-            echo -e "\n=== 编译失败，最后50行日志： ==="
-            tail -50 build.log
-          fi
-
-      ###########################################################################
-      # 步骤5：上传固件和日志（方便下载和排查）
-      ###########################################################################
-      - name: 5. 上传产物
-        uses: actions/upload-artifact@v4
+      - name: 安装Go 1.21.1（iStoreOS编译依赖）
+        uses: actions/setup-go@v1
         with:
-          name: XGP-iStoreOS-Final
-          path: |
-            istoreos-src/bin/targets/**/*.img.gz
-            istoreos-src/bin/targets/**/*.bin
-            istoreos-src/build.log
-          retention-days: 7
+          go-version: 1.21.1
+
+      ###########################################################################
+      # 步骤2：克隆源码与缓存构建
+      ###########################################################################
+      - name: 克隆iStoreOS源码
+        working-directory: ${{ env.WORK_DIR }}
+        run: |
+          git clone ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
+          # 建立软链接，方便后续操作
+          ln -sf ${{ env.WORK_DIR }}/openwrt ${{ github.workspace }}/openwrt
+
+      - name: 缓存编译文件（加速二次编译）
+        uses: klever1988/cachewrtbuild@main
+        with:
+          ccache: 'true'
+          mixkey: ${{ runner.os }}-${{ matrix.ARCHITECTURE }}-${{ env.REPO_BRANCH }}
+          prefix: ${{ github.workspace }}/openwrt
+
+      ###########################################################################
+      # 步骤3：加载xgp设备配置（核心配置表）
+      ###########################################################################
+      - name: 写入xgp设备.config配置文件
+        run: |
+          cd ${{ github.workspace }}/openwrt
+          # 将提供的xgp配置表写入.config文件（关键步骤）
+          cat > ${{ env.CONFIG_FILE }} << 'EOF'
+# 1. 目标平台与系统基础配置
+CONFIG_TARGET_rockchip=y
+CONFIG_TARGET_rockchip_armv8=y
+CONFIG_TARGET_MULTI_PROFILE=y
+CONFIG_TARGET_ALL_PROFILES=y
+CONFIG_TARGET_DEVICE_rockchip_rk35xx_DEVICE_nlnet_xgp=y
+CONFIG_TARGET_BOARD="rockchip"
+CONFIG_TARGET_SUBTARGET="armv8"
+CONFIG_TARGET_PROFILE="DEVICE_nlnet_xiguapi-v3"
+CONFIG_TARGET_ARCH_PACKAGES="aarch64_generic"
+CONFIG_HAS_SUBTARGETS=y
+CONFIG_HAS_DEVICES=y
+CONFIG_TARGET_KERNEL_PARTSIZE=64
+# CONFIG_TARGET_ROOTFS_EXT4FS is not set
+CONFIG_TARGET_ROOTFS_PARTSIZE=256
+CONFIG_VERSIONOPT=y
+CONFIG_VERSION_DIST="iStoreOS"
+CONFIG_VERSION_REPO="https://mirrors.cernet.edu.cn/openwrt/releases/%V"
+CONFIG_VERSION_MANUFACTURER="XGP"
+CONFIG_shadow-all=y
+# CONFIG_VERSION_CODE_FILENAMES is not set
+# CONFIG_VERSION_FILENAMES is not set
+# CONFIG_IB is not set
+CONFIG_IB_STANDALONE=y
+CONFIG_MODULES=y
+CONFIG_HAVE_DOT_CONFIG=y
+CONFIG_HOST_OS_LINUX=y
+CONFIG_DISPLAY_SUPPORT=y
+CONFIG_ALL_KMODS=y
+CONFIG_DEVEL=y
+CONFIG_BUSYBOX_CUSTOM=y
+CONFIG_BUILD_PATENTED=y
+CONFIG_CCACHE=y
+CONFIG_IMAGEOPT=y
+CONFIG_NEED_BPF_TOOLCHAIN=y
+CONFIG_USE_LLVM_BUILD=y
+CONFIG_VERSION_BUG_URL=""
+CONFIG_VERSION_CODE=""
+CONFIG_VERSION_HOME_URL=""
+CONFIG_VERSION_HWREV=""
+CONFIG_VERSION_MANUFACTURER_URL=""
+CONFIG_VERSION_NUMBER=""
+CONFIG_VERSION_SUPPORT_URL=""
+
+# 2. CPU与架构配置
+CONFIG_ARM64=y
+CONFIG_ARM64_GENERIC_CPU=y
+CONFIG_ARM64_CPUIDLE=y
+CONFIG_ARM64_PA_BITS_48=y
+CONFIG_SMP=y
+CONFIG_NR_CPUS=4
+CONFIG_CPU_FREQ=y
+CONFIG_CPU_FREQ_ROCKCHIP=y
+CONFIG_CPU_FREQ_GOV_ONDEMAND=y
+CONFIG_KERNEL_ARM_PMU=y
+CONFIG_KERNEL_ARM_PMUV3=y
+CONFIG_MACH_ROCKCHIP=y
+CONFIG_MACH_ROCKCHIP_RK3568=y
+CONFIG_ROCKCHIP_SOC=y
+
+# 3. 内存与存储配置
+CONFIG_MEMORY_LPDDR4X=y
+CONFIG_HIGHMEM=y
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_EMMC=y
+CONFIG_MMC_EMMC_BOOT=y
+CONFIG_MMC_EMMC_HS200=y
+CONFIG_MMC_EMMC_DDR52=y
+CONFIG_MMC_ROCKCHIP=y
+CONFIG_MMC_SD=y
+CONFIG_MMC_SD_HIGHSPEED=y
+CONFIG_MMC_ROCKCHIP_SDMMC=y
+CONFIG_MMC_SPI=y
+CONFIG_KMOD_ATA_CORE=y
+CONFIG_KMOD_LOOP=y
+CONFIG_KMOD_ZRAM=y
+CONFIG_ZRAM_SWAP=y
+CONFIG_PACKAGE_kmod-ata-core=y
+CONFIG_PACKAGE_kmod-mmc=y
+CONFIG_PACKAGE_kmod-loop=y
+CONFIG_PACKAGE_kmod-zram=y
+CONFIG_PACKAGE_ntfs3-mount=y
+CONFIG_PACKAGE_ntfsprogs=y
+CONFIG_PACKAGE_losetup=y
+CONFIG_PACKAGE_swap-utils=y
+CONFIG_PACKAGE_zram-swap=y
+
+# 4. 网络配置 - 以太网
+CONFIG_ETHERNET=y
+CONFIG_NETDEVICES=y
+CONFIG_ROCKCHIP_GMAC=y
+CONFIG_ROCKCHIP_GMAC_RGMII=y
+CONFIG_PHYLIB=y
+CONFIG_PHY_REALTEK=y
+CONFIG_PHY_REALTEK_RTL8211F=y
+CONFIG_NET_ETHERNET_MII=y
+CONFIG_GIGABIT_ETHERNET=y
+CONFIG_KMOD_PHY_REALTEK=y
+CONFIG_KMOD_MII=y
+CONFIG_KMOD_NET_SELFTESTS=y
+CONFIG_KMOD_OF_MDIO=y
+CONFIG_KMOD_PHYLINK=y
+CONFIG_PACKAGE_kmod-phy-realtek=y
+CONFIG_PACKAGE_kmod-mii=y
+CONFIG_PACKAGE_kmod-net-selftests=y
+CONFIG_PACKAGE_etherwake=y
+CONFIG_PACKAGE_tcpdump=y
+
+# 5. 网络配置 - WiFi
+CONFIG_WLAN=y
+CONFIG_WLAN_VENDOR_MEDIATEK=y
+CONFIG_MT7921E=y
+CONFIG_MT7921_COMMON=y
+CONFIG_MT7921_WIFI6=y
+CONFIG_WIRELESS_EXT=y
+CONFIG_CFG80211=y
+CONFIG_MAC80211=y
+CONFIG_MAC80211_DEBUGFS=y
+CONFIG_MAC80211_MESH=y
+CONFIG_RFKILL=y
+CONFIG_KMOD_CFG80211=y
+CONFIG_KMOD_LIB80211=y
+CONFIG_KMOD_MAC80211=y
+CONFIG_KMOD_MT7915_FIRMWARE=y
+CONFIG_KMOD_MT7915E=y
+CONFIG_KMOD_MT7916_FIRMWARE=y
+CONFIG_WIRELESS_REGDB=y
+CONFIG_DRIVER_11AC_SUPPORT=y
+CONFIG_DRIVER_11AX_SUPPORT=y
+CONFIG_DRIVER_11N_SUPPORT=y
+CONFIG_PACKAGE_MAC80211_DEBUGFS=y
+CONFIG_PACKAGE_MAC80211_MESH=y
+CONFIG_PACKAGE_kmod-mt7915-firmware=y
+CONFIG_PACKAGE_kmod-mt7915e=y
+CONFIG_PACKAGE_kmod-mt7916-firmware=y
+CONFIG_PACKAGE_kmod-mt7922-firmware=y
+CONFIG_PACKAGE_kmod-mt7922-common=y
+CONFIG_PACKAGE_wireless-regdb=y
+CONFIG_PACKAGE_hostapd-openssl=y
+CONFIG_PACKAGE_wpa-cli=y
+CONFIG_PACKAGE_wpa-supplicant-openssl=y
+
+# 6. 网络配置 - WWAN/5G (QModem核心)
+CONFIG_PCIE_MOBILE_WWAN=y
+CONFIG_NET_WWAN=y
+CONFIG_QMI_WWAN=y
+CONFIG_SIM_CARD=y
+CONFIG_SIM_CARD_SPI=y
+CONFIG_KMOD_QRTR=y
+CONFIG_KMOD_QRTR_MHI=y
+CONFIG_KMOD_QRTR_TUN=y
+CONFIG_KMOD_MHI_BUS=y
+CONFIG_KMOD_MHI_NET=y
+CONFIG_KMOD_MHI_PCI_GENERIC=y
+CONFIG_KMOD_MHI_WWAN_CTRL=y
+CONFIG_KMOD_MHI_WWAN_MBIM=y
+CONFIG_KMOD_WWAN=y
+CONFIG_UMBIM=y
+CONFIG_UQMI=y
+CONFIG_QMI_UTILS=y
+CONFIG_USB_MODESWITCH=y
+CONFIG_LIBQMI_COLLECTION_BASIC=y
+CONFIG_LIBQMI_WITH_MBIM_QMUX=y
+CONFIG_LIBQMI_WITH_QRTR_GLIB=y
+CONFIG_MODEMMANAGER_WITH_MBIM=y
+CONFIG_MODEMMANAGER_WITH_QMI=y
+CONFIG_MODEMMANAGER_WITH_QRTR=y
+CONFIG_PACKAGE_libmbim=y
+CONFIG_PACKAGE_libqmi=y
+CONFIG_PACKAGE_libqrtr-glib=y
+CONFIG_PACKAGE_luci-app-qmodem=y
+CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_SMS=y
+CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_MULTI_WAN=y
+CONFIG_PACKAGE_luci-i18n-qmodem-zh-cn=y
+CONFIG_PACKAGE_luci-proto-mbim=y
+CONFIG_PACKAGE_luci-proto-modemmanager=y
+CONFIG_PACKAGE_luci-proto-qmi=y
+CONFIG_PACKAGE_modemmanager=y
+CONFIG_PACKAGE_qmi-utils=y
+CONFIG_PACKAGE_umbim=y
+CONFIG_PACKAGE_uqmi=y
+CONFIG_PACKAGE_wwan=y
+CONFIG_PACKAGE_usb-modeswitch=y
+CONFIG_PACKAGE_kmod-qrtr=y
+CONFIG_PACKAGE_kmod-qrtr-mhi=y
+CONFIG_PACKAGE_kmod-qrtr-tun=y
+CONFIG_PACKAGE_kmod-mhi-bus=y
+CONFIG_PACKAGE_kmod-mhi-net=y
+CONFIG_PACKAGE_kmod-mhi-pci-generic=y
+CONFIG_PACKAGE_kmod-mhi-wwan-ctrl=y
+CONFIG_PACKAGE_kmod-mhi-wwan-mbim=y
+CONFIG_PACKAGE_kmod-wwan=y
+
+# 7. 网络配置 - 网络工具与服务
+CONFIG_KMOD_TUN=y
+CONFIG_KMOD_VXLAN=y
+CONFIG_KMOD_WIREGUARD=y
+CONFIG_KMOD_XDP_SOCKETS_DIAG=y
+CONFIG_KMOD_DNSRESOLVER=y
+CONFIG_KMOD_IP_VTI=y
+CONFIG_KMOD_IP6_VTI=y
+CONFIG_KMOD_IPTABLES_EXTRA=y
+CONFIG_KMOD_IP6TABLES_NFT=y
+CONFIG_KMOD_IPTABLES_NFT=y
+CONFIG_KMOD_NF_CONNCOUNT=y
+CONFIG_KMOD_NF_CONNTRACK_NETLINK=y
+CONFIG_KMOD_NF_IPT=y
+CONFIG_KMOD_NF_IPT6=y
+CONFIG_KMOD_NF_NATHELPER=y
+CONFIG_KMOD_NFT_BRIDGE=y
+CONFIG_KMOD_NFT_COMPAT=y
+CONFIG_UNETD_VXLAN_SUPPORT=y
+CONFIG_PACKAGE_ip-full=y
+CONFIG_PACKAGE_ip6tables-nft=y
+CONFIG_PACKAGE_iperf3=y
+CONFIG_PACKAGE_ipset=y
+CONFIG_PACKAGE_iptables-mod-extra=y
+CONFIG_PACKAGE_iptables-nft=y
+CONFIG_PACKAGE_libiperf3=y
+CONFIG_PACKAGE_libipset=y
+CONFIG_PACKAGE_libiptext=y
+CONFIG_PACKAGE_libiptext-nft=y
+CONFIG_PACKAGE_libiptext6=y
+CONFIG_PACKAGE_libnatpmp=y
+CONFIG_PACKAGE_luci-proto-3g=y
+CONFIG_PACKAGE_luci-proto-external=y
+CONFIG_PACKAGE_luci-proto-gre=y
+CONFIG_PACKAGE_luci-proto-ipv6=y
+CONFIG_PACKAGE_luci-proto-ppp=y
+CONFIG_PACKAGE_luci-proto-relay=y
+CONFIG_PACKAGE_luci-proto-unet=y
+CONFIG_PACKAGE_miniupnpd-nftables=y
+CONFIG_PACKAGE_netfilter-conntrack=y
+CONFIG_PACKAGE_libnfnetlink=y
+CONFIG_PACKAGE_proto-bonding=m
+CONFIG_PACKAGE_quickstart=y
+CONFIG_PACKAGE_relayd=y
+CONFIG_PACKAGE_resolveip=y
+CONFIG_PACKAGE_rpcd-mod-iwinfo=y
+CONFIG_PACKAGE_rpcd-mod-rrdns=y
+CONFIG_PACKAGE_unet-cli=y
+CONFIG_PACKAGE_unetd=y
+CONFIG_PACKAGE_xtables-nft=y
+CONFIG_PACKAGE_kmod-tun=y
+CONFIG_PACKAGE_kmod-vxlan=y
+CONFIG_PACKAGE_kmod-wireguard=y
+CONFIG_PACKAGE_kmod-xdp-sockets-diag=y
+CONFIG_PACKAGE_kmod-of-mdio=y
+CONFIG_PACKAGE_kmod-oid-registry=y
+CONFIG_PACKAGE_kmod-phylink=y
+
+# 8. 硬件驱动 - DRM与显示
+CONFIG_DRM=y
+CONFIG_DRM_MALI=y
+CONFIG_DRM_MALI_PLATFORM=y
+CONFIG_DRM_MALI_G52=y
+CONFIG_MALI_GPU_MEMORY_MANAGER=y
+CONFIG_MALI_CSF_FIRMWARE=y
+CONFIG_DRM_PANFROST=y
+CONFIG_DRM_SCHED=y
+CONFIG_DRM_ROCKCHIP=y
+CONFIG_DRM_ROCKCHIP_HDMI=y
+CONFIG_DRM_ROCKCHIP_HDMI_20=y
+CONFIG_DRM_HDMI_CEC=y
+CONFIG_HDMI_AUDIO=y
+CONFIG_LIBDRM=y
+CONFIG_RKMPP=y
+CONFIG_RKRGA=y
+CONFIG_KMOD_DMA_BUF=y
+CONFIG_KMOD_DRM_KMS_HELPER=y
+CONFIG_KMOD_DRM_ROCKCHIP_RK35XX=y
+CONFIG_KMOD_DRM_ROCKCHIP_RK35XX_HDMITX=y
+CONFIG_KMOD_DRM_SHMEM_HELPER=y
+CONFIG_KMOD_DRM_DISPLAY_HELPER=y
+CONFIG_SPI=y
+CONFIG_SPI_ROCKCHIP=y
+CONFIG_SPI_MASTER=y
+CONFIG_DRM_PANEL=y
+CONFIG_DRM_PANEL_ILITEK_GC9307=y
+CONFIG_BACKLIGHT=y
+CONFIG_BACKLIGHT_GPIO=y
+CONFIG_KMOD_SPI_CORE=y
+CONFIG_KMOD_I2C_CORE=y
+CONFIG_KMOD_I2C_ALGO_BIT=y
+CONFIG_KMOD_FB=y
+CONFIG_KMOD_FB_SPI=y
+CONFIG_KMOD_DRM_SPI=y
+CONFIG_KMOD_FB_TFT=y
+CONFIG_KMOD_FB_TFT_GC9307=y
+CONFIG_KMOD_FB_CFB_COPYAREA=y
+CONFIG_KMOD_FB_CFB_FILLRECT=y
+CONFIG_KMOD_FB_CFB_IMGBLT=y
+CONFIG_KMOD_FB_SYS_FOPS=y
+CONFIG_KMOD_FB_SYS_RAM=y
+CONFIG_KMOD_MULTIMEDIA_INPUT=y
+CONFIG_PACKAGE_libdrm=y
+CONFIG_PACKAGE_mali-csf-firmware=y
+CONFIG_PACKAGE_rkmpp=y
+CONFIG_PACKAGE_rkrga=y
+CONFIG_PACKAGE_kmod-dma-buf=y
+CONFIG_PACKAGE_kmod-drm=y
+CONFIG_PACKAGE_kmod-drm-kms-helper=y
+CONFIG_PACKAGE_kmod-drm-rockchip-rk35xx=y
+CONFIG_PACKAGE_kmod-drm-rockchip-rk35xx-hdmitx=y
+CONFIG_PACKAGE_kmod-drm-shmem-helper=y
+CONFIG_PACKAGE_kmod-fb=y
+CONFIG_PACKAGE_kmod-fb-cfb-copyarea=y
+CONFIG_PACKAGE_kmod-fb-cfb-fillrect=y
+CONFIG_PACKAGE_kmod-fb-cfb-imgblt=y
+CONFIG_PACKAGE_kmod-fb-sys-fops=y
+CONFIG_PACKAGE_kmod-fb-sys-ram=y
+CONFIG_PACKAGE_kmod-spi-core=y
+CONFIG_PACKAGE_kmod-i2c-core=y
+CONFIG_PACKAGE_kmod-i2c-algo-bit=y
+CONFIG_PACKAGE_kmod-fb-spi=y
+CONFIG_PACKAGE_kmod-drm-spi=y
+CONFIG_PACKAGE_kmod-fb-tft=y
+CONFIG_PACKAGE_kmod-fb-tft-gc9307=y
+CONFIG_PACKAGE_kmod-drm-display-helper=y
+CONFIG_PACKAGE_kmod-drm-panfrost=y
+CONFIG_PACKAGE_kmod-drm-sched=y
+CONFIG_PACKAGE_kmod-multimedia-input=y
+
+# 9. 硬件驱动 - USB与PCIe
+CONFIG_PCI=y
+CONFIG_PCIE=y
+CONFIG_PCIE_ROCKCHIP=y
+CONFIG_PCIE_ROCKCHIP_EP=y
+CONFIG_PCIE_ASPM=y
+CONFIG_PCIE_ROCKCHIP_HOST=y
+CONFIG_USB=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_XHCI_ROCKCHIP=y
+CONFIG_USB_OTG=y
+CONFIG_USB_OTG_FSM=y
+CONFIG_USB_OTG_UTILS=y
+CONFIG_USB_GADGET=y
+CONFIG_KMOD_USB3=y
+CONFIG_KMOD_USB2=y
+CONFIG_KMOD_USB2_PCI=y
+CONFIG_KMOD_USB_STORAGE=y
+CONFIG_KMOD_USB_STORAGE_UAS=y
+CONFIG_PACKAGE_kmod-pcie=y
+CONFIG_PACKAGE_kmod-pcie-rockchip=y
+CONFIG_PACKAGE_kmod-usb3=y
+CONFIG_PACKAGE_kmod-usb-xhci-hcd=y
+CONFIG_PACKAGE_kmod-usb-otg=y
+CONFIG_PACKAGE_kmod-usb2=y
+CONFIG_PACKAGE_kmod-usb2-pci=y
+CONFIG_PACKAGE_kmod-usb-storage=y
+CONFIG_PACKAGE_kmod-usb-storage-uas=y
+CONFIG_PACKAGE_libusb-1.0=y
+CONFIG_PACKAGE_libusbmuxd=y
+CONFIG_PACKAGE_usbids=y
+CONFIG_PACKAGE_usbmuxd=y
+CONFIG_PACKAGE_usbutils=y
+
+# 10. 硬件驱动 - 风扇与温度
+CONFIG_PWM=y
+CONFIG_PWM_ROCKCHIP=y
+CONFIG_FAN=y
+CONFIG_PWM_FAN=y
+CONFIG_THERMAL=y
+CONFIG_ROCKCHIP_THERMAL=y
+CONFIG_KMOD_PWM=y
+CONFIG_KMOD_PWM_ROCKCHIP=y
+CONFIG_KMOD_HWMON=y
+CONFIG_KMOD_HWMON_CORE=y
+CONFIG_KMOD_HWMON_ROCKCHIP=y
+CONFIG_KMOD_FAN=y
+CONFIG_KMOD_FAN_PWM=y
+CONFIG_PACKAGE_kmod-pwm=y
+CONFIG_PACKAGE_kmod-pwm-rockchip=y
+CONFIG_PACKAGE_kmod-hwmon=y
+CONFIG_PACKAGE_kmod-hwmon-core=y
+CONFIG_PACKAGE_kmod-hwmon-rockchip=y
+CONFIG_PACKAGE_kmod-fan=y
+CONFIG_PACKAGE_kmod-fan-pwm=y
+CONFIG_PACKAGE_luci-app-fan=y
+CONFIG_PACKAGE_smartd=y
+CONFIG_PACKAGE_smartmontools=y
+CONFIG_PACKAGE_sysstat=y
+
+# 11. 硬件驱动 - LED与按钮
+CONFIG_LEDS=y
+CONFIG_LEDS_GPIO=y
+CONFIG_LEDS_TRIGGERS=y
+CONFIG_LEDS_TRIGGER_HEARTBEAT=y
+CONFIG_LEDS_TRIGGER_RFKILL=y
+CONFIG_LEDS_TRIGGER_DEFAULT_ON=y
+CONFIG_LEDS_TRIGGER_NETDEV=y
+CONFIG_INPUT=y
+CONFIG_INPUT_KEYBOARD=y
+CONFIG_KEYBOARD_GPIO=y
+CONFIG_KEYS=y
+CONFIG_KEYS_RECOVERY=y
+CONFIG_KEYS_RESTART=y
+CONFIG_KEYS_RESET=y
+CONFIG_INPUT_DEBOUNCE=y
+CONFIG_KMOD_LEDS_GPIO=y
+CONFIG_KMOD_LEDTRIG_DEFAULT_ON=y
+CONFIG_KMOD_LEDTRIG_HEARTBEAT=y
+CONFIG_KMOD_LEDTRIG_NETDEV=y
+CONFIG_KMOD_GPIO_BUTTON_HOTPLUG=y
+CONFIG_KMOD_INPUT_GPIO_KEYS=y
+CONFIG_KMOD_REBOOT_MODE=y
+CONFIG_KMOD_BUTTON_HOTPLUG=y
+CONFIG_PACKAGE_kmod-leds-gpio=y
+CONFIG_PACKAGE_kmod-ledtrig-default-on=y
+CONFIG_PACKAGE_kmod-ledtrig-heartbeat=y
+CONFIG_PACKAGE_kmod-ledtrig-netdev=y
+CONFIG_PACKAGE_kmod-gpio-button-hotplug=y
+CONFIG_PACKAGE_kmod-input-gpio-keys=y
+CONFIG_PACKAGE_kmod-reboot-mode=y
+CONFIG_PACKAGE_kmod-button-hotplug=y
+CONFIG_PACKAGE_kmod-input-core=y
+CONFIG_PACKAGE_kmod-input-evdev=y
+
+# 12. 硬件驱动 - 电源与 regulators
+CONFIG_REGULATOR=y
+CONFIG_REGULATOR_ROCKCHIP=y
+CONFIG_REGULATOR_ROCKCHIP_RK8XX=y
+CONFIG_REGULATOR_FIXED_VOLTAGE=y
+CONFIG_POWER_SUPPLY=y
+CONFIG_POWER_SUPPLY_RK8XX=y
+CONFIG_DC_DC_CONVERTER=y
+CONFIG_POWER_AVS=y
+CONFIG_POWER_AVS_ROCKCHIP=y
+CONFIG_KMOD_BACKLIGHT=y
+CONFIG_KMOD_BACKLIGHT_GPIO=y
+CONFIG_PACKAGE_kmod-backlight=y
+CONFIG_PACKAGE_kmod-backlight-gpio=y
+
+# 13. 软件包 - 系统基础工具
+CONFIG_DWARVES=y
+CONFIG_PARTED_READLINE=y
+CONFIG_PERL_NOCOMMENT=y
+CONFIG_PERL_THREADS=y
+CONFIG_REPRODUCIBLE_DEBUG_INFO=y
+CONFIG_PACKAGE_adb=y
+CONFIG_PACKAGE_adb-enablemodem=y
+CONFIG_PACKAGE_appfilter=y
+CONFIG_PACKAGE_bash=y
+CONFIG_PACKAGE_ca-certificates=y
+CONFIG_PACKAGE_coreutils-stat=y
+CONFIG_PACKAGE_davfs2=y
+CONFIG_PACKAGE_dbus=y
+CONFIG_PACKAGE_ddns-scripts=y
+CONFIG_PACKAGE_ddns-scripts-cloudflare=y
+CONFIG_PACKAGE_ddns-scripts-dnspod=y
+CONFIG_PACKAGE_ddns-scripts-services=y
+CONFIG_PACKAGE_ddns-scripts_aliyun=y
+CONFIG_PACKAGE_ddnsto=y
+CONFIG_PACKAGE_dkml=y
+# CONFIG_PACKAGE_dnsmasq is not set
+CONFIG_PACKAGE_dnsmasq-full=y
+CONFIG_PACKAGE_dnsmasq_full_auth=y
+CONFIG_PACKAGE_dnsmasq_full_conntrack=y
+CONFIG_PACKAGE_dnsmasq_full_dhcp=y
+CONFIG_PACKAGE_dnsmasq_full_dhcpv6=y
+CONFIG_PACKAGE_dnsmasq_full_dnssec=y
+CONFIG_PACKAGE_dnsmasq_full_ipset=y
+CONFIG_PACKAGE_dnsmasq_full_nftset=y
+CONFIG_PACKAGE_dnsmasq_full_noid=y
+CONFIG_PACKAGE_dnsmasq_full_tftp=y
+CONFIG_PACKAGE_dtc=y
+CONFIG_PACKAGE_external-protocol=y
+CONFIG_PACKAGE_fdisk=y
+CONFIG_PACKAGE_glib2=y
+CONFIG_PACKAGE_gre=y
+CONFIG_PACKAGE_htop=y
+CONFIG_PACKAGE_istoreos-intl=m
+CONFIG_PACKAGE_libatomic=y
+CONFIG_PACKAGE_libavahi-client=y
+CONFIG_PACKAGE_libavahi-dbus-support=y
+CONFIG_PACKAGE_libbpf=y
+CONFIG_PACKAGE_libcap=y
+CONFIG_PACKAGE_libcap-ng=y
+CONFIG_PACKAGE_libdaemon=y
+CONFIG_PACKAGE_libdbus=y
+CONFIG_PACKAGE_libdevmapper=y
+CONFIG_PACKAGE_libelf=y
+CONFIG_PACKAGE_libevdev=y
+CONFIG_PACKAGE_libexpat=y
+CONFIG_PACKAGE_libfdisk=y
+CONFIG_PACKAGE_libffi=y
+CONFIG_PACKAGE_libfuse=y
+CONFIG_PACKAGE_libgcrypt=y
+CONFIG_PACKAGE_libgdbm=y
+CONFIG_PACKAGE_libgmp=y
+CONFIG_PACKAGE_libgpg-error=y
+CONFIG_PACKAGE_libimobiledevice=y
+CONFIG_PACKAGE_libimobiledevice-glue=y
+CONFIG_PACKAGE_libkeyutils=y
+CONFIG_PACKAGE_libkmod=y
+CONFIG_PACKAGE_liblzo=y
+CONFIG_PACKAGE_libncurses=y
+CONFIG_PACKAGE_libneon=y
+CONFIG_PACKAGE_libnettle=y
+CONFIG_PACKAGE_libopenssl=y
+CONFIG_PACKAGE_libopenssl-conf=y
+CONFIG_PACKAGE_libopenssl-legacy=y
+CONFIG_PACKAGE_libparted=y
+CONFIG_PACKAGE_libpcap=y
+CONFIG_PACKAGE_libpci=y
+CONFIG_PACKAGE_libpcre2=y
+CONFIG_PACKAGE_libplist=y
+CONFIG_PACKAGE_libpopt=y
+CONFIG_PACKAGE_libreadline=y
+CONFIG_PACKAGE_libseccomp=y
+CONFIG_PACKAGE_libstdcpp=y
+CONFIG_PACKAGE_libsysfs=y
+CONFIG_PACKAGE_libtasn1=y
+CONFIG_PACKAGE_libtirpc=y
+CONFIG_PACKAGE_libudev-zero=y
+CONFIG_PACKAGE_liburing=y
+CONFIG_PACKAGE_libuv=y
+CONFIG_PACKAGE_libwebsockets-full=y
+CONFIG_PACKAGE_libwrap=y
+CONFIG_PACKAGE_libxml2=y
+CONFIG_PACKAGE_libxtables=y
+CONFIG_PACKAGE_linkease=y
+CONFIG_PACKAGE_linkmount=y
+CONFIG_PACKAGE_lrzsz=y
+CONFIG_PACKAGE_lsblk=y
+CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_luci-lib-docker=y
+CONFIG_PACKAGE_luci-lib-fs=y
+CONFIG_PACKAGE_luci-lib-mac-vendor=y
+CONFIG_PACKAGE_luci-light=y
+CONFIG_PACKAGE_luci-mod-admin-full=y
+CONFIG_PACKAGE_luci-mod-network=y
+CONFIG_PACKAGE_luci-mod-status=y
+CONFIG_PACKAGE_luci-mod-system=y
+CONFIG_PACKAGE_luci-ssl-openssl=y
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+CONFIG_PACKAGE_mdadm=y
+CONFIG_PACKAGE_openssh-sftp-server=y
+CONFIG_PACKAGE_openssl-util=y
+CONFIG_PACKAGE_parted=y
+CONFIG_PACKAGE_pciids=y
+CONFIG_PACKAGE_pciutils=y
+CONFIG_PACKAGE_perl=y
+CONFIG_PACKAGE_perlbase-base=y
+CONFIG_PACKAGE_perlbase-bytes=y
+CONFIG_PACKAGE_perlbase-class=y
+CONFIG_PACKAGE_perlbase-config=y
+CONFIG_PACKAGE_perlbase-cwd=y
+CONFIG_PACKAGE_perlbase-errno=y
+CONFIG_PACKAGE_perlbase-essential=y
+CONFIG_PACKAGE_perlbase-fcntl=y
+CONFIG_PACKAGE_perlbase-file=y
+CONFIG_PACKAGE_perlbase-filehandle=y
+CONFIG_PACKAGE_perlbase-i18n=y
+CONFIG_PACKAGE_perlbase-integer=y
+CONFIG_PACKAGE_perlbase-io=y
+CONFIG_PACKAGE_perlbase-list=y
+CONFIG_PACKAGE_perlbase-locale=y
+CONFIG_PACKAGE_perlbase-params=y
+CONFIG_PACKAGE_perlbase-posix=y
+CONFIG_PACKAGE_perlbase-re=y
+CONFIG_PACKAGE_perlbase-scalar=y
+CONFIG_PACKAGE_perlbase-selectsaver=y
+CONFIG_PACKAGE_perlbase-socket=y
+CONFIG_PACKAGE_perlbase-symbol=y
+CONFIG_PACKAGE_perlbase-tie=y
+CONFIG_PACKAGE_perlbase-unicore=y
+CONFIG_PACKAGE_perlbase-utf8=y
+CONFIG_PACKAGE_perlbase-xsloader=y
+CONFIG_PACKAGE_Procps-ng=y
+CONFIG_PACKAGE_Procps-ng-vmstat=y
+CONFIG_PACKAGE_rpcbind=y
+CONFIG_PACKAGE_runc=y
+CONFIG_PACKAGE_shadow=y
+CONFIG_PACKAGE_strace=y
+CONFIG_PACKAGE_swconfig=y
+CONFIG_PACKAGE_sysfsutils=y
+CONFIG_PACKAGE_terminfo=y
+CONFIG_PACKAGE_tini=y
+CONFIG_PACKAGE_ttyd=y
+CONFIG_PACKAGE_uhttpd=y
+CONFIG_PACKAGE_uhttpd-mod-ubus=y
+CONFIG_PACKAGE_unishare=y
+CONFIG_PACKAGE_unzip=y
+CONFIG_PACKAGE_webdav2=y
+CONFIG_PACKAGE_wget-ssl=y
+CONFIG_PACKAGE_wsdd2=y
+CONFIG_PACKAGE_zlib=y
+CONFIG_PACKAGE_libmbedtls=y
+CONFIG_PACKAGE_kmod-asn1-decoder=y
+CONFIG_PACKAGE_kmod-bonding=y
+CONFIG_PACKAGE_kmod-br-netfilter=y
+
+# 14. 软件包 - LuCI应用
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-app-argon-config=y
+CONFIG_PACKAGE_luci-app-cifs-mount=y
+CONFIG_PACKAGE_luci-app-cpufreq=y
+CONFIG_PACKAGE_luci-app-ddns=y
+CONFIG_PACKAGE_luci-app-ddnsto=y
+CONFIG_PACKAGE_luci-app-diskman=y
+CONFIG_PACKAGE_luci-app-diskman_INCLUDE_btrfs_progs=y
+CONFIG_PACKAGE_luci-app-diskman_INCLUDE_lsblk=y
+CONFIG_PACKAGE_luci-app-dockerman=y
+CONFIG_PACKAGE_luci-app-filetransfer=y
+CONFIG_PACKAGE_luci-app-firewall=y
+CONFIG_PACKAGE_luci-app-istorex=m
+CONFIG_PACKAGE_luci-app-linkease=y
+CONFIG_PACKAGE_luci-app-nfs=y
+CONFIG_PACKAGE_luci-app-oaf=y
+CONFIG_PACKAGE_luci-app-oled=y
+CONFIG_PACKAGE_luci-app-ota=y
+CONFIG_PACKAGE_luci-app-package-manager=y
+CONFIG_PACKAGE_luci-app-quickstart=y
+CONFIG_PACKAGE_luci-app-samba4=y
+CONFIG_PACKAGE_luci-app-ttyd=y
+CONFIG_PACKAGE_luci-app-unishare=y
+CONFIG_PACKAGE_luci-app-upnp=y
+CONFIG_PACKAGE_luci-app-wol=y
+CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-cifs-mount-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-cpufreq-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-ddns-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-ddnsto-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-diskman-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-dockerman-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-fan-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-filetransfer-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-linkease-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-nfs-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-oaf-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-oled-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-ota-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-quickstart-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-samba4-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-unishare-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-upnp-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-wol-zh-cn=y
+
+# 15. 软件包 - Docker与存储服务
+CONFIG_DOCKER_NET_ENCRYPT=y
+CONFIG_DOCKER_NET_MACVLAN=y
+CONFIG_DOCKER_NET_OVERLAY=y
+CONFIG_DOCKER_NET_TFTP=y
+CONFIG_DOCKER_OPTIONAL_FEATURES=y
+CONFIG_DOCKER_STO_BTRFS=y
+CONFIG_DOCKER_STO_EXT4=y
+CONFIG_NFS_KERNEL_SERVER_V4=y
+CONFIG_RPCBIND_LIBWRAP=y
+CONFIG_RPCBIND_RMTCALLS=y
+CONFIG_SAMBA4_SERVER_AVAHI=y
+CONFIG_SAMBA4_SERVER_NETBIOS=y
+CONFIG_SAMBA4_SERVER_VFS=y
+CONFIG_SAMBA4_SERVER_WSDD2=y
+CONFIG_PACKAGE_containerd=y
+CONFIG_PACKAGE_cifsmount=y
+CONFIG_PACKAGE_docker=y
+CONFIG_PACKAGE_docker-compose=y
+CONFIG_PACKAGE_dockerd=y
+CONFIG_PACKAGE_nfs-kernel-server=y
+CONFIG_PACKAGE_nfs-kernel-server-utils=y
+CONFIG_PACKAGE_nfs-utils=y
+CONFIG_PACKAGE_nfs-utils-libs=y
+CONFIG_PACKAGE_samba4-libs=y
+CONFIG_PACKAGE_samba4-server=y
+CONFIG_PACKAGE_wwan=y
+
+# 16. 内核功能 - 调试与性能
+CONFIG_KERNEL_DEBUG_INFO_BTF=y
+CONFIG_KERNEL_DEBUG_INFO_BTF_MODULES=y
+CONFIG_KERNEL_FTRACE=y
+CONFIG_KERNEL_PERF_EVENTS=y
+CONFIG_KERNEL_BPF_EVENTS=y
+CONFIG_KERNEL_CFQ_GROUP_IOSCHED=y
+CONFIG_KERNEL_CGROUP_DEVICE=y
+CONFIG_KERNEL_CGROUP_FREEZER=y
+CONFIG_KERNEL_CGROUP_HUGETLB=y
+CONFIG_KERNEL_CGROUP_NET_PRIO=y
+CONFIG_KERNEL_CGROUP_PERF=y
+# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set
+CONFIG_KERNEL_HUGETLBFS=y
+CONFIG_KERNEL_HUGETLB_PAGE=y
+CONFIG_KERNEL_KPROBES=y
+CONFIG_KERNEL_KPROBE_EVENTS=y
+CONFIG_KERNEL_MEMCG_SWAP_ENABLED=y
+CONFIG_KERNEL_MODULE_ALLOW_BTF_MISMATCH=y
+CONFIG_KERNEL_NET_CLS_CGROUP=y
+CONFIG_KERNEL_TRANSPARENT_HUGEPAGE=y
+CONFIG_KERNEL_TRANSPARENT_HUGEPAGE_ALWAYS=y
+CONFIG_KERNEL_XDP_SOCKETS=y
+CONFIG_KMOD_SCHED=y
+CONFIG_KMOD_SCHED_CORE=y
+CONFIG_KMOD_OAF=y
+CONFIG_PACKAGE_kmod-ikconfig=y
+CONFIG_PACKAGE_kmod-sched=y
+CONFIG_PACKAGE_kmod-sched-core=y
+CONFIG_PACKAGE_kmod-oaf=y
+
+# 17. 内核功能 - 加密驱动
+CONFIG_KMOD_CRYPTO_ACOMPRESS=y
+CONFIG_KMOD_CRYPTO_AEAD=y
+CONFIG_KMOD_CRYPTO_ARC4=y
+CONFIG_KMOD_CRYPTO_AUTHENC=y
+CONFIG_KMOD_CRYPTO_CBC=y
+CONFIG_KMOD_CRYPTO_CCM=y
+CONFIG_KMOD_CRYPTO_CMAC=y
+CONFIG_KMOD_CRYPTO_CRC32=y
+CONFIG_KMOD_CRYPTO_CTR=y
+CONFIG_KMOD_CRYPTO_DES=y
+CONFIG_KMOD_CRYPTO_ECB=y
+CONFIG_KMOD_CRYPTO_GCM=y
+CONFIG_KMOD_CRYPTO_HMAC=y
+CONFIG_KMOD_CRYPTO_LIB_CHACHA20=y
+CONFIG_KMOD_CRYPTO_LIB_CHACHA20POLY1305=y
+CONFIG_KMOD_CRYPTO_LIB_POLY1305=y
+CONFIG_KMOD_CRYPTO_MANAGER=y
+CONFIG_KMOD_CRYPTO_MD5=y
+CONFIG_KMOD_CRYPTO_RNG=y
+CONFIG_KMOD_CRYPTO_SHA1=y
+CONFIG_KMOD_CRYPTO_SHA256=y
+CONFIG_KMOD_CRYPTO_USER=y
+CONFIG_OPENSSL_ENGINE=y
+CONFIG_OPENSSL_OPTIMIZE_SPEED=y
+CONFIG_OPENSSL_WITH_ASM=y
+CONFIG_OPENSSL_WITH_CHACHA_POLY1305=y
+CONFIG_OPENSSL_WITH_CMS=y
+CONFIG_OPENSSL_WITH_DEPRECATED=y
+CONFIG_OPENSSL_WITH_ERROR_MESSAGES=y
+CONFIG_OPENSSL_WITH_IDEA=y
+CONFIG_OPENSSL_WITH_MDC2=y
+CONFIG_OPENSSL_WITH_PSK=y
+CONFIG_OPENSSL_WITH_SEED=y
+CONFIG_OPENSSL_WITH_SRP=y
+CONFIG_OPENSSL_WITH_TLS13=y
+CONFIG_OPENSSL_WITH_WHIRLPOOL=y
+CONFIG_GNUTLS_ALPN=y
+CONFIG_GNUTLS_ANON=y
+CONFIG_GNUTLS_DTLS_SRTP=y
+CONFIG_GNUTLS_HEARTBEAT=y
+CONFIG_GNUTLS_OCSP=y
+CONFIG_GNUTLS_PSK=y
+CONFIG_HTOP_LMSENSORS=y
+# CONFIG_LIBCURL_MBEDTLS is not set
+CONFIG_LIBCURL_OPENSSL=y
+CONFIG_LIBCURL_VERBOSE=y
+CONFIG_LIBCURL_ZLIB=y
+CONFIG_LIBCURL_ZSTD=y
+CONFIG_PACKAGE_kmod-crypto-acompress=y
+CONFIG_PACKAGE_kmod-crypto-aead=y
+CONFIG_PACKAGE_kmod-crypto-arc4=y
+CONFIG_PACKAGE_kmod-crypto-authenc=y
+CONFIG_PACKAGE_kmod-crypto-blake2b=y
+CONFIG_PACKAGE_kmod-crypto-cbc=y
+CONFIG_PACKAGE_kmod-crypto-ccm=y
+CONFIG_PACKAGE_kmod-crypto-cmac=y
+CONFIG_PACKAGE_kmod-crypto-crc32=y
+CONFIG_PACKAGE_kmod-crypto-ctr=y
+CONFIG_PACKAGE_kmod-crypto-cts=y
+CONFIG_PACKAGE_kmod-crypto-deflate=y
+CONFIG_PACKAGE_kmod-crypto-des=y
+CONFIG_PACKAGE_kmod-crypto-ecb=y
+CONFIG_PACKAGE_kmod-crypto-echainiv=y
+CONFIG_PACKAGE_kmod-crypto-gcm=y
+CONFIG_PACKAGE_kmod-crypto-gf128=y
+CONFIG_PACKAGE_kmod-crypto-ghash=y
+CONFIG_PACKAGE_kmod-crypto-hmac=y
+CONFIG_PACKAGE_kmod-crypto-kpp=y
+CONFIG_PACKAGE_kmod-crypto-lib-chacha20=y
+CONFIG_PACKAGE_kmod-crypto-lib-chacha20poly1305=y
+CONFIG_PACKAGE_kmod-crypto-lib-curve25519=y
+CONFIG_PACKAGE_kmod-crypto-lib-poly1305=y
+CONFIG_PACKAGE_kmod-crypto-manager=y
+CONFIG_PACKAGE_kmod-crypto-md4=y
+CONFIG_PACKAGE_kmod-crypto-md5=y
+CONFIG_PACKAGE_kmod-crypto-null=y
+CONFIG_PACKAGE_kmod-crypto-rng=y
+CONFIG_PACKAGE_kmod-crypto-seqiv=y
+CONFIG_PACKAGE_kmod-crypto-sha1=y
+CONFIG_PACKAGE_kmod-crypto-sha256=y
+CONFIG_PACKAGE_kmod-crypto-sha512=y
+CONFIG_PACKAGE_kmod-crypto-user=y
+CONFIG_PACKAGE_kmod-crypto-xxhash=y
+CONFIG_PACKAGE_kmod-dnsresolver=y
+CONFIG_PACKAGE_kmod-ip-vti=y
+CONFIG_PACKAGE_kmod-ip6-vti=y
+CONFIG_PACKAGE_kmod-ip6tables-extra=y
+CONFIG_PACKAGE_kmod-ipt-account=y
+CONFIG_PACKAGE_kmod-ipt-compat-xtables=y
+CONFIG_PACKAGE_kmod-ipt-condition=y
+CONFIG_PACKAGE_kmod-ipt-conntrack=y
+CONFIG_PACKAGE_kmod-ipt-conntrack-extra=y
+CONFIG_PACKAGE_kmod-ipt-conntrack-label=y
+CONFIG_PACKAGE_kmod-ipt-core=y
+CONFIG_PACKAGE_kmod-ipt-extra=y
+CONFIG_PACKAGE_kmod-ipt-filter=y
+CONFIG_PACKAGE_kmod-ipt-fuzzy=y
+CONFIG_PACKAGE_kmod-ipt-geoip=y
+CONFIG_PACKAGE_kmod-ipt-iface=y
+CONFIG_PACKAGE_kmod-ipt-ipmark=y
+CONFIG_PACKAGE_kmod-ipt-ipopt=y
+CONFIG_PACKAGE_kmod-ipt-ipp2p=y
+CONFIG_PACKAGE_kmod-ipt-iprange=y
+CONFIG_PACKAGE_kmod-ipt-ipsec=y
+CONFIG_PACKAGE_kmod-ipt-ipset=y
+CONFIG_PACKAGE_kmod-ipt-length2=y
+CONFIG_PACKAGE_kmod-ipt-logmark=y
+CONFIG_PACKAGE_kmod-ipt-lscan=y
+CONFIG_PACKAGE_kmod-ipt-lua=y
+CONFIG_PACKAGE_kmod-ipt-nat=y
+CONFIG_PACKAGE_kmod-ipt-nat6=y
+CONFIG_PACKAGE_kmod-ipt-nat-extra=y
+CONFIG_PACKAGE_kmod-ipt-nathelper-rtsp=y
+CONFIG_PACKAGE_kmod-ipt-offload=y
+CONFIG_PACKAGE_kmod-ipt-physdev=y
+CONFIG_PACKAGE_kmod-ipt-quota2=y
+CONFIG_PACKAGE_kmod-ipt-raw=y
+CONFIG_PACKAGE_kmod-ipt-socket=y
+CONFIG_PACKAGE_kmod-ipt-tproxy=y
+CONFIG_PACKAGE_kmod-keys-encrypted=y
+CONFIG_PACKAGE_kmod-keys-trusted=y
+CONFIG_PACKAGE_kmod-lib-cordic=y
+CONFIG_PACKAGE_kmod-lib-crc-itu-t=y
+CONFIG_PACKAGE_kmod-lib-crc16=y
+CONFIG_PACKAGE_kmod-lib-crc7=y
+CONFIG_PACKAGE_kmod-lib-lzo=y
+CONFIG_PACKAGE_kmod-lib-raid6=y
+CONFIG_PACKAGE_kmod-lib-textsearch=y
+CONFIG_PACKAGE_kmod-lib-xor=y
+CONFIG_PACKAGE_kmod-lib-zlib-deflate=y
+CONFIG_PACKAGE_kmod-lib-zlib-inflate=y
+CONFIG_PACKAGE_kmod-lib-zstd=y
+CONFIG_PACKAGE_kmod-mmc-spi=y
+CONFIG_PACKAGE_kmod-nf-conncount=y
+CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y
+CONFIG_PACKAGE_kmod-nf-ipt=y
+CONFIG_PACKAGE_kmod-nf-ipt6=y
+CONFIG_PACKAGE_kmod-nf-ipvs=y
+CONFIG_PACKAGE_kmod-nf-nat6=y
+CONFIG_PACKAGE_kmod-nf-nathelper=y
+CONFIG_PACKAGE_kmod-nf-nathelper-extra=y
+CONFIG_PACKAGE_kmod-nf-socket=y
+CONFIG_PACKAGE_kmod-nf-tproxy=y
+CONFIG_PACKAGE_kmod-nft-bridge=y
+CONFIG_PACKAGE_kmod-nft-compat=y
+CONFIG_PACKAGE_kmod-nft-netdev=y
+CONFIG_PACKAGE_kmod-nft-socket=y
+CONFIG_PACKAGE_kmod-nft-tproxy=y
+CONFIG_PACKAGE_kmod-nlmon=y
+EOF
+
+      ###########################################################################
+      # 步骤4：配置开机自动启动5G模块（基于QModem/uqmi）
+      ###########################################################################
+      - name: 添加5G自动启动脚本
+        run: |
+          # 创建脚本目录（确保路径存在）
+          mkdir -p ${{ github.workspace }}/openwrt/files/etc/init.d/
+          # 写入5G自动启动脚本（使用uqmi工具，适配QModem）
+          cat > ${{ github.workspace }}/openwrt/files/etc/init.d/qmodem-auto-start << 'EOF'
+#!/bin/sh /etc/rc.common
+# 5G模块自动启动脚本（xgp设备专用）
+
+START=95  # 启动优先级（95表示较晚启动，确保依赖服务就绪）
+STOP=05   # 停止优先级
+
+# 读取环境变量中的APN（编译时通过workflow传入）
+5G_APN="${5G_APN:-cmnet}"
+
+start() {
+    echo "===== 开始启动5G模块 ====="
+    
+    # 1. 等待WWAN接口就绪（最多等待30秒）
+    for i in $(seq 1 30); do
+        if ip link show wwan0 > /dev/null 2>&1; then
+            echo "WWAN接口（wwan0）已就绪"
+            break
+        fi
+        echo "等待WWAN接口就绪（$i/30）..."
+        sleep 1
+    done
+
+    # 2. 检查uqmi工具是否存在
+    if ! command -v uqmi > /dev/null 2>&1; then
+        echo "错误：uqmi工具未安装，无法启动5G模块"
+        return 1
+    fi
+
+    # 3. 重置5G模块（可选，部分模块需要）
+    uqmi -d /dev/cdc-wdm0 --reset-device > /dev/null 2>&1
+    sleep 3
+
+    # 4. 设置APN（根据运营商调整，默认cmnet）
+    echo "设置5G APN为：$5G_APN"
+    uqmi -d /dev/cdc-wdm0 --set-apn "$5G_APN" > /dev/null 2>&1
+
+    # 5. 激活5G数据连接
+    echo "激活5G数据连接..."
+    uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect > /dev/null 2>&1
+    sleep 5
+
+    # 6. 检查连接状态
+    CONN_STATUS=$(uqmi -d /dev/cdc-wdm0 --get-data-status | grep "connected" | wc -l)
+    if [ $CONN_STATUS -eq 1 ]; then
+        echo "5G模块启动成功！"
+        # 获取IP地址并打印
+        IP_ADDR=$(uqmi -d /dev/cdc-wdm0 --get-current-settings | grep "ip-family" -A 1 | grep "ip" | awk -F'"' '{print $4}')
+        echo "5G分配的IP地址：$IP_ADDR"
+    else
+        echo "警告：5G模块启动失败，尝试重新激活..."
+        # 重试一次激活
+        uqmi -d /dev/cdc-wdm0 --stop-network > /dev/null 2>&1
+        sleep 2
+        uqmi -d /dev/cdc-wdm0 --start-network "$5G_APN" --autoconnect > /dev/null 2>&1
+        sleep 5
+        CONN_STATUS=$(uqmi -d /dev/cdc-wdm0 --get-data-status | grep "connected" | wc -l)
+        if [ $CONN_STATUS -eq 1 ]; then
+            echo "5G模块重试启动成功！"
+        else
+            echo "错误：5G模块启动失败，请检查模块或APN配置"
+        fi
+    fi
+
+    echo "===== 5G模块启动流程结束 ====="
+}
+
+stop() {
+    echo "===== 开始停止5G模块 ====="
+    # 停止5G数据连接
+    if command -v uqmi > /dev/null 2>&1 && ip link show wwan0 > /dev/null 2>&1; then
+        uqmi -d /dev/cdc-wdm0 --stop-network > /dev/null 2>&1
+        echo "5G数据连接已停止"
+    fi
+    echo "===== 5G模块停止流程结束 ====="
+}
+EOF
+          # 设置脚本可执行权限
+          chmod 755 ${{ github.workspace }}/openwrt/files/etc/init.d/qmodem-auto-start
+          # 配置开机自动启动（通过rc.d软链接）
+          mkdir -p ${{ github.workspace }}/openwrt/files/etc/rc.d/
+          ln -sf ../init.d/qmodem-auto-start ${{ github.workspace }}/openwrt/files/etc/rc.d/S95qmodem-auto-start
+          # 将APN写入环境变量（脚本启动时读取）
+          echo "5G_APN=${{ github.event.inputs.5g_apn }}" >> ${{ github.workspace }}/openwrt/files/etc/profile
+
+      ###########################################################################
+      # 步骤5：配置开机自动开启WiFi热点（MT7921 WiFi6模块）
+      ###########################################################################
+      - name: 配置WiFi热点自动开启
+        run: |
+          # 1. 创建WiFi配置目录
+          mkdir -p ${{ github.workspace }}/openwrt/files/etc/config/
+          # 2. 写入WiFi配置文件（适配MT7921，支持2.4G/5G双频段）
+          cat > ${{ github.workspace }}/openwrt/files/etc/config/wireless << EOF
+config wifi-device 'radio0'
+    option type 'mac80211'
+    option path 'platform/soc/fe300000.mmci/mmc_host/mmc1/mmc1:0001/mmc1:0001:1'  # 2.4G WiFi路径（MT7921）
+    option channel '6'                                                      # 2.4G信道（1/6/11可选，避免干扰）
+    option band '2g'                                                        # 频段：2.4G
+    option htmode 'HT20'                                                    # 带宽：20MHz（兼容性更好）
+    option country 'CN'                                                     # 国家码（中国）
+    option disabled '0'                                                     # 启用2.4G WiFi
+
+config wifi-iface 'default_radio0'
+    option device 'radio0'
+    option network 'lan'
+    option mode 'ap'                                                        # 模式：接入点（热点）
+    option ssid '${{ github.event.inputs.wifi_ssid_2g }}'                   # 2.4G热点名称（编译时传入）
+    option encryption 'psk2'                                                # 加密方式：WPA2-PSK
+    option key '${{ github.event.inputs.wifi_password }}'                   # 2.4G热点密码（编译时传入）
+
+config wifi-device 'radio1'
+    option type 'mac80211'
+    option path 'platform/soc/fe300000.mmci/mmc_host/mmc2/mmc2:0001/mmc2:0001:1'  # 5G WiFi路径（MT7921）
+    option channel '36'                                                      # 5G信道（36/40/44/48可选，避免干扰）
+    option band '5g'                                                        # 频段：5G
+    option htmode 'VHT80'                                                   # 带宽：80MHz（WiFi6速率更高）
+    option country 'CN'                                                     # 国家码（中国）
+    option disabled '0'                                                     # 启用5G WiFi
+
+config wifi-iface 'default_radio1'
+    option device 'radio1'
+    option network 'lan'
+    option mode 'ap'                                                        # 模式：接入点（热点）
+    option ssid '${{ github.event.inputs.wifi_ssid_5g }}'                   # 5G热点名称（编译时传入）
+    option encryption 'psk2'                                                # 加密方式：WPA2-PSK
+    option key '${{ github.event.inputs.wifi_password }}'                   # 5G热点密码（编译时传入）
+EOF
+          # 3. 确保WiFi服务开机启动
+          mkdir -p ${{ github.workspace }}/openwrt/files/etc/rc.d/
+          # 启用hostapd和wpa_supplicant服务（热点依赖）
+          ln -sf ../init.d/hostapd ${{ github.workspace }}/openwrt/files/etc/rc.d/S90hostapd
+          ln -sf ../init.d/wpa_supplicant ${{ github.workspace }}/openwrt/files/etc/rc.d/S90wpa_supplicant
+
+      ###########################################################################
+      # 步骤6：编译前基础配置（LAN IP、系统名称）
+      ###########################################################################
+      - name: 设置LAN IP地址（路由器管理地址）
+        run: |
+          cd ${{ github.workspace }}/openwrt
+          SET_IP=${{ github.event.inputs.lan_ip }}
+          # 替换默认LAN IP（原OpenWrt默认192.168.1.1）
+          sed -i "s/192\.168\.[0-9]*\.[0-9]*/$SET_IP/g" package/base-files/files/bin/config_generate
+          echo "✅ 已设置LAN管理地址：$SET_IP"
+
+      - name: 设置系统名称
+        run: |
+          cd ${{ github.workspace }}/openwrt
+          set_os_name="${{ github.event.inputs.os_name }}"
+          # 替换系统名称（界面显示用）
+          sed -i "s/OpenWrt/${set_os_name}/g" package/base-files/files/bin/config_generate
+          echo "✅ 已设置系统名称：${set_os_name}"
+
+      ###########################################################################
+      # 步骤7：SSH调试（可选，临时开启）
+      ###########################################################################
+      - name: SSH连接调试（临时开启）
+        uses: P3TERX/ssh2actions@v1.0.0
+        if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh != 'false') || contains(github.event.action, 'ssh')
+        env:
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}  # 可选：Telegram通知（需配置密钥）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+      ###########################################################################
+      # 步骤8：编译固件（核心步骤）
+      ###########################################################################
+      - name: 下载依赖软件包（加速编译）
+        run: |
+          cd ${{ github.workspace }}/openwrt
+          make defconfig  # 加载.config配置
+          make download -j$(nproc)  # 多线程下载依赖
+          # 清理损坏的下载文件（避免编译失败）
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+          echo "✅ 依赖软件包下载完成"
+
+      - name: 编译固件
+        id: compile
+        run: |
+          cd ${{ github.workspace }}/openwrt
+          echo "✅ 开始编译，使用$(nproc)线程"
+          # 首次编译用多线程，失败则用单线程调试
+          make -j$(nproc) || make -j1 || make -j1 V=s
+          # 记录编译时间（用于固件命名）
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+          echo "::set-output name=status::success"
+          echo "✅ 固件编译完成"
+
+      ###########################################################################
+      # 步骤9：上传与发布固件
+      ###########################################################################
+      - name: 检查磁盘空间（可选，排查问题用）
+        if: (!cancelled())
+        run: df -hT
+
+      - name: 上传bin文件夹（含中间文件，用于调试）
+        uses: actions/upload-artifact@main
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        with:
+          name: iStoreOS-xgp-bin${{ env.FILE_DATE }}
+          path: ${{ github.workspace }}/openwrt/bin
+
+      - name: 整理最终固件文件
+        id: organize
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        run: |
+          # 进入固件输出目录（RK35xx平台固件路径）
+          cd ${{ github.workspace }}/openwrt/bin/targets/rockchip/armv8
+          # 删除冗余的packages文件夹（仅保留固件）
+          rm -rf packages
+          # 记录固件目录路径
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "::set-output name=status::success"
+          echo "✅ 固件文件整理完成，路径：$PWD"
+
+      - name: 上传最终固件（Artifact）
+        uses: actions/upload-artifact@main
+        if: steps.organize.outputs.status == 'success' && !cancelled()
+        with:
+          name: iStoreOS-xgp-firmware${{ env.FILE_DATE }}
+          path: ${{ env.FIRMWARE }}
+
+      - name: 生成Releases发布说明
+        id: tag
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+        run: |
+          # 设置发布标签（架构+日期）
+          RELEASE_TAG="xgp-rk35xx-24.10${{ env.FILE_DATE }}"
+          echo "::set-output name=release_tag::${RELEASE_TAG}"
+          # 生成发布说明
+          touch release.txt
+          echo "
+          # iStoreOS 固件（xgp 设备专用）
+          
+          ## 设备信息
+          - 芯片平台：Rockchip RK35xx（${{ matrix.ARCHITECTURE }}）
+          - 系统版本：iStoreOS 24.10
+          - 编译时间：$(date +"%Y年%m月%d日%H时%M分")
+          
+          ## 初始配置
+          - 管理地址：${{ github.event.inputs.lan_ip }}
+          - 用户名：root
+          - 密码：password（首次登录需修改）
+          - 2.4G WiFi：${{ github.event.inputs.wifi_ssid_2g }} / ${{ github.event.inputs.wifi_password }}
+          - 5G WiFi：${{ github.event.inputs.wifi_ssid_5g }} / ${{ github.event.inputs.wifi_password }}
+          - 5G APN：${{ github.event.inputs.5g_apn }}
+          
+          ## 功能说明
+          1. 开机自动启动5G模块（基于QModem/uqmi）
+          2. 开机自动开启WiFi6热点（2.4G+5G双频段）
+          3. 包含LuCI中文界面、Docker、Samba等工具
+          4. 支持风扇温控、LED状态指示、HDMI输出
+          
+          ## 刷机提示
+          - 固件格式：.img（SD卡/EMMC刷机）
+          - 参考工具：BalenaEtcher（SD卡烧录）
+          - 注意：刷机前备份数据，首次启动可能需要2-3分钟" >> release.txt
+          echo "::set-output name=status::success"
+
+      - name: 发布固件到Releases
+        uses: softprops/action-gh-release@v1
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          body_path: release.txt
+          files: ${{ env.FIRMWARE }}/*
+          draft: false  # 直接发布（非草稿）
+          prerelease: false  # 正式版本（非预发布）
+
+      ###########################################################################
+      # 步骤10：清理冗余记录（避免仓库空间占用过大）
+      ###########################################################################
+      - name: 删除旧工作流记录（保留1天内，最少3条）
+        uses: GitRML/delete-workflow-runs@main
+        with:
+          retain_days: 1
+          keep_minimum_runs: 3
+          token: ${{ env.GITHUB_TOKEN }}
+
+      - name: 删除旧Releases固件（保留最新6个）
+        uses: dev-drprasad/delete-older-releases@v0.1.0
+        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+        with:
+          keep_latest: 6
+          delete_tags: true  # 同时删除对应的标签
