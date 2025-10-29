@@ -1198,7 +1198,7 @@ EOF
           keep_minimum_runs: 3
           token: ${{ env.GITHUB_TOKEN }}
 
-      - name: 删除旧Releases固件
+      - name: 删除旧Releases固件 
         uses: dev-drprasad/delete-older-releases@v0.1.0
         if: env.UPLOAD_RELEASE == 'true' && !cancelled()
         with:
