@@ -19,7 +19,7 @@ on:
         description: 'WiFi密码（8-63位）'
         required: true
         default: 'xgp123456'
-      5g_apn:
+      apn_5g:  # 关键修改：将5g_apn改为apn_5g（避免以数字开头）
         description: '5G模块APN（移动cmnet/联通3gnet/电信ctnet）'
         required: true
         default: 'cmnet'
@@ -56,10 +56,10 @@ jobs:
           large-packages: true
           swap-storage: true
 
-      - name: Checkout config files (分离的配置文件)
+      - name: Checkout config files
         uses: actions/checkout@v4
         with:
-          path: config-repo  # 拉取包含config-files的仓库到config-repo目录
+          path: config-repo
           fetch-depth: 1
 
       - name: Clone iStoreOS source
@@ -79,24 +79,18 @@ jobs:
 
       - name: 引入5G启动脚本并替换变量
         run: |
-          # 创建目标目录
           mkdir -p openwrt/files/etc/init.d/
-          # 复制外部5G脚本到源码目录
           cp config-repo/config-files/5g-auto openwrt/files/etc/init.d/
-          # 替换脚本中的APN占位符
-          sed -i "s/__5G_APN__/${{ github.event.inputs.5g_apn }}/g" openwrt/files/etc/init.d/5g-auto
-          # 设置权限+开机启动
+          # 关键修改：同步引用apn_5g
+          sed -i "s/__5G_APN__/${{ github.event.inputs.apn_5g }}/g" openwrt/files/etc/init.d/5g-auto
           chmod 755 openwrt/files/etc/init.d/5g-auto
           mkdir -p openwrt/files/etc/rc.d/
           ln -sf ../init.d/5g-auto openwrt/files/etc/rc.d/S955g-auto
 
       - name: 引入WiFi配置并替换变量
         run: |
-          # 创建目标目录
           mkdir -p openwrt/files/etc/config/
-          # 复制外部WiFi配置到源码目录
           cp config-repo/config-files/wireless openwrt/files/etc/config/
-          # 替换WiFi配置中的占位符
           sed -i "s/__WIFI_2G_SSID__/${{ github.event.inputs.wifi_2g_ssid }}/g" openwrt/files/etc/config/wireless
           sed -i "s/__WIFI_5G_SSID__/${{ github.event.inputs.wifi_5g_ssid }}/g" openwrt/files/etc/config/wireless
           sed -i "s/__WIFI_PASSWORD__/${{ github.event.inputs.wifi_password }}/g" openwrt/files/etc/config/wireless
