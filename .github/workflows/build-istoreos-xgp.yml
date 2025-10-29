@@ -53,7 +53,7 @@ jobs:
           cd istoreos-src
           # 替换为你的 XGP 设备 config 文件（建议存放在 GitHub 仓库或公开链接）
           # 示例：从你的仓库拉取 XGP.config（需修改 URL）
-          wget -q -O .config https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/XGP.config
+          wget -q -O .config https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/XGP.config
           # 检查配置并自动修复依赖（静默模式）
           make defconfig -s 2>/dev/null
 
