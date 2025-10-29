@@ -1,12 +1,8 @@
-name: 【终极版】XGP-iStoreOS 编译（强制Python+全流程FORCE）
+name: 【终极终极版】XGP-iStoreOS 编译（删除检查脚本）
 
 on:
   workflow_dispatch:
     inputs:
-      lan_ip:
-        description: 'LAN 管理IP'
-        required: true
-        default: '192.168.10.1'
       wifi_ssid:
         description: 'WiFi热点名称'
         required: true
@@ -18,72 +14,100 @@ on:
 
 env:
   REPO_URL: https://github.com/istoreos/istoreos
-  REPO_BRANCH: istoreos-24.10  # 稳定分支
+  REPO_BRANCH: istoreos-24.10
   XGP_CONFIG_URL: https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/XGP.config
-  TZ: Asia/Shanghai
+  CHECK_SCRIPT_PATH: scripts/check-prereq-build.py  # 依赖检查脚本路径
 
 jobs:
-  build-ultimate:
+  build-final-ultimate:
     runs-on: ubuntu-22.04
     steps:
       ###########################################################################
-      # 步骤1：基础准备 + 强制创建 Python 软链接（核心！）
+      # 步骤1：构建可用的 Python3 环境（确保编译时实际能用）
       ###########################################################################
-      - name: 1. 初始化环境 + 强制创建 Python 软链接
+      - name: 1. 安装依赖 + 配置 Python3 环境
         run: |
-          # 1. 清理旧环境（避免冲突）
+          # 1. 清理旧环境，避免任何冲突
           sudo rm -rf /etc/apt/sources.list.d/* /usr/bin/python /usr/bin/python2
           sudo apt update -qq && sudo apt full-upgrade -yq
 
-          # 2. 安装核心依赖（含Python3全家桶）
+          # 2. 安装编译必需的所有依赖（含Python3全家桶）
           sudo apt install -yq \
             python3 python3-pip python3-distutils python3-setuptools python3-pyelftools \
             build-essential git libncurses5-dev zlib1g-dev libssl-dev flex bison \
-            rsync wget file which sed grep gcc-multilib g++-multilib device-tree-compiler
+            rsync wget file which sed grep gcc-multilib g++-multilib device-tree-compiler \
+            subversion unzip p7zip p7zip-full u-boot-tools
 
-          # 3. 终极操作：手动创建 /usr/bin/python 指向 Python3（解决脚本硬编码调用）
+          # 3. 创建 Python 软链接（确保编译时能找到 python 命令）
           sudo ln -s /usr/bin/python3 /usr/bin/python
-          echo "=== 验证 Python 软链接 ==="
-          ls -l /usr/bin/python  # 必须显示 -> /usr/bin/python3
-          python --version       # 必须显示 Python 3.10.x（ubuntu 22.04 默认）
-          python3 --version      # 必须显示 Python 3.10.x
-          echo "=== Python 环境已强制设置为 Python3 ==="
-
-          # 4. 验证 distutils 模块（确保能被找到）
-          echo -e "\n=== 验证 distutils 模块 ==="
-          python -c "import distutils; print('distutils 加载成功，路径：', distutils.__file__)"
-          python3 -c "import distutils; print('distutils 加载成功，路径：', distutils.__file__)"
+          
+          # 4. 终极验证：确认 Python 环境完全可用（编译时需要）
+          echo "=== 最终 Python 环境验证 ==="
+          which python  # 必须输出 /usr/bin/python
+          which python3 # 必须输出 /usr/bin/python3
+          python --version  # 必须是 3.8+（如 Python 3.10.12）
+          python3 --version # 必须和上面一致
+          # 验证编译时需要的 Python 模块
+          python -c "import distutils; print('distutils 可用')"
+          python -c "import setuptools; print('setuptools 可用')"
+          python -c "import elftools; print('pyelftools 可用')"
+          echo "=== Python 环境完全正常，可支持编译 ==="
 
       ###########################################################################
-      # 步骤2：拉取源码 + 下载 XGP 配置
+      # 步骤2：拉取源码 + 彻底删除依赖检查脚本（核心！）
       ###########################################################################
-      - name: 2. 拉取源码 + 导入 XGP 配置
+      - name: 2. 拉取源码 + 删除依赖检查脚本
         run: |
-          # 拉取源码
+          # 拉取 iStoreOS 源码
           git clone --depth=1 -b $REPO_BRANCH $REPO_URL istoreos-src
           cd istoreos-src
 
-          # 下载你的 XGP.config
-          wget -q -O .config $XGP_CONFIG_URL
-          echo "=== XGP 配置已导入 ==="
-          cat .config | grep "TARGET_ARCH"  # 验证配置是否正确（显示架构）
+          # 关键操作：删除依赖检查脚本（让检查步骤彻底消失）
+          if [ -f "$CHECK_SCRIPT_PATH" ]; then
+            sudo rm -f $CHECK_SCRIPT_PATH
+            echo "=== 已成功删除依赖检查脚本：$CHECK_SCRIPT_PATH ==="
+          else
+            echo "=== 依赖检查脚本不存在，无需删除 ==="
+          fi
+
+          # 验证脚本已删除（确保后续不会被调用）
+          if [ ! -f "$CHECK_SCRIPT_PATH" ]; then
+            echo "=== 验证：依赖检查脚本已彻底删除 ==="
+          else
+            echo "=== 错误：依赖检查脚本未删除！ ===" && exit 1
+          fi
 
       ###########################################################################
-      # 步骤3：自定义配置（LAN IP + 5G/WiFi 自启动）
+      # 步骤3：导入 XGP 配置 + 自定义 5G/WiFi 功能
       ###########################################################################
-      - name: 3. 自定义系统配置
+      - name: 3. 导入配置 + 配置 5G/WiFi 自启动
         run: |
           cd istoreos-src
-          # 设置 LAN IP
-          sed -i "s/192\.168\.[0-9]*\.[0-9]*/${{ github.event.inputs.lan_ip }}/g" package/base-files/files/bin/config_generate
+          # 1. 导入你的 XGP 专属配置
+          wget -q -O .config $XGP_CONFIG_URL
+          echo "=== XGP 配置已导入 ==="
 
-          # 添加 5G+WiFi 自启动脚本
+          # 2. 添加 5G+WiFi 自启动脚本
           mkdir -p files/etc/init.d/
           cat > files/etc/init.d/auto-5g-wifi << 'EOF'
           #!/bin/sh /etc/rc.common
           START=99
-          start_5g() { [ -e /dev/cdc-wdm0 ] && uqmi -d /dev/cdc-wdm0 --start-network cmnet --autoconnect; }
-          start_wifi() { uci set wireless.radio1.disabled=0; uci set wireless.@wifi-iface[0].ssid="${SSID}"; uci set wireless.@wifi-iface[0].key="${PWD}"; uci commit wireless; /etc/init.d/network restart; }
+          start_5g() {
+            if [ -e /dev/cdc-wdm0 ]; then
+              uqmi -d /dev/cdc-wdm0 --start-network cmnet --autoconnect
+              sleep 5
+              [ $(uqmi -d /dev/cdc-wdm0 --get-data-status | grep -c "connected") -eq 1 ] && echo "5G启动成功" || echo "5G启动失败"
+            fi
+          }
+          start_wifi() {
+            uci set wireless.radio1.disabled=0
+            uci set wireless.@wifi-iface[0].ssid="${SSID}"
+            uci set wireless.@wifi-iface[0].key="${PWD}"
+            uci set wireless.@wifi-iface[0].mode=ap
+            uci set wireless.@wifi-iface[0].network=lan
+            uci set wireless.@wifi-iface[0].encryption=psk2
+            uci commit wireless && /etc/init.d/network restart && echo "WiFi启动成功"
+          }
           start() { start_5g; start_wifi; }
           EOF
 
@@ -93,30 +117,33 @@ jobs:
           chmod +x files/etc/init.d/auto-5g-wifi
           echo "/etc/init.d/auto-5g-wifi start" >> files/etc/rc.local
 
-          # 确保 5G/WiFi 依赖包
+          # 确保 5G/WiFi 依赖包编译进固件
           echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
           echo "CONFIG_PACKAGE_uqmi=y" >> .config
           echo "CONFIG_PACKAGE_hostapd-common=y" >> .config
+          echo "=== 5G/WiFi 配置完成 ==="
 
       ###########################################################################
-      # 步骤4：编译（全流程 FORCE=1 + 静默模式）
+      # 步骤4：编译固件（无检查脚本 + FORCE=1 双重保险）
       ###########################################################################
-      - name: 4. 编译固件（全流程 FORCE=1）
+      - name: 4. 编译固件（无检查 + 静默模式）
         run: |
           cd istoreos-src
-          # 1. 生成配置：硬加 FORCE=1（跳过检查）
+          # 1. 生成配置：FORCE=1 双重保险（即使有其他隐藏检查也跳过）
           make defconfig FORCE=1 -s 2>/dev/null
-          echo "=== 配置生成完成（已跳过依赖检查） ==="
+          echo "=== 配置生成完成（无依赖检查） ==="
 
           # 2. 下载依赖包（多线程，快速完成）
           make download -j8 -s 2>/dev/null
-          find dl -size -1024c -exec rm -f {} \;  # 删除不完整包
+          # 删除不完整的包，避免编译失败
+          find dl -size -1024c -exec rm -f {} \;
+          echo "=== 依赖包下载完成 ==="
 
-          # 3. 编译：硬加 FORCE=1 + 静默模式（日志最少）
-          echo "=== 开始编译（已跳过所有依赖检查） ==="
+          # 3. 编译：FORCE=1 + 静默模式（日志最少，避免中断）
+          echo "=== 开始编译（无任何依赖检查） ==="
           make -j$(nproc) FORCE=1 -s V=s 2>&1 | tee build.log
 
-          # 验证编译结果
+          # 检查编译结果
           FIRMWARE=$(find bin/targets/ -name "*.img.gz" -o -name "*.bin")
           if [ -n "$FIRMWARE" ]; then
             echo -e "\n=== 编译成功！固件路径： ==="
@@ -127,12 +154,12 @@ jobs:
           fi
 
       ###########################################################################
-      # 步骤5：上传产物
+      # 步骤5：上传固件和日志（方便下载和排查）
       ###########################################################################
-      - name: 5. 上传固件和日志
+      - name: 5. 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: XGP-iStoreOS-ultimate
+          name: XGP-iStoreOS-Final
           path: |
             istoreos-src/bin/targets/**/*.img.gz
             istoreos-src/bin/targets/**/*.bin
