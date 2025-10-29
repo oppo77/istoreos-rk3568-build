@@ -1,0 +1,188 @@
+name: 编译 iStoreOS（XGP 设备）- 自动启5G+WiFi热点
+
+# 触发条件：手动触发（避免自动编译浪费资源）
+on:
+  workflow_dispatch:
+    inputs:
+      # 可选：让用户编译时指定 iStoreOS 分支（默认稳定版）
+      istoreos_branch:
+        description: 'iStoreOS 源码分支'
+        required: true
+        default: 'main'
+      # 可选：WiFi热点配置（用户可在触发时修改）
+      wifi_ssid:
+        description: 'WiFi热点名称（SSID）'
+        required: true
+        default: 'XGP-5G-Hotspot'
+      wifi_password:
+        description: 'WiFi热点密码（8-63位）'
+        required: true
+        default: 'XGP123456'
+
+# 工作流核心配置
+jobs:
+  build-istoreos-xgp:
+    runs-on: ubuntu-latest
+    steps:
+      ###########################################################################
+      # 步骤1：初始化环境（安装依赖，最小化日志输出）
+      ###########################################################################
+      - name: 1. 安装编译依赖（静默模式）
+        run: |
+          # 用 -qq 减少 apt 日志，-yq 自动确认（无交互）
+          sudo apt-get update -qq
+          sudo apt-get install -yq \
+            git gcc g++ make libncurses5-dev libz-dev libssl-dev \
+            python3 python3-pip unzip wget curl file subversion \
+            flex bison bc dwarves rsync libelf-dev
+
+      ###########################################################################
+      # 步骤2：拉取 iStoreOS 源码（指定分支）
+      ###########################################################################
+      - name: 2. 拉取 iStoreOS 源码
+        run: |
+          git clone --depth=1 -b ${{ github.event.inputs.istoreos_branch }} \
+            https://github.com/istoreos/istoreos.git istoreos-src
+          cd istoreos-src
+
+      ###########################################################################
+      # 步骤3：导入 XGP 设备配置文件（关键！需替换为你的 XGP.config）
+      ###########################################################################
+      - name: 3. 导入 XGP 硬件配置
+        run: |
+          cd istoreos-src
+          # 替换为你的 XGP 设备 config 文件（建议存放在 GitHub 仓库或公开链接）
+          # 示例：从你的仓库拉取 XGP.config（需修改 URL）
+          wget -q -O .config https://raw.githubusercontent.com/你的用户名/你的仓库/main/XGP.config
+          # 检查配置并自动修复依赖（静默模式）
+          make defconfig -s 2>/dev/null
+
+      ###########################################################################
+      # 步骤4：自定义固件（开机自动启5G + 开启WiFi热点）
+      ###########################################################################
+      - name: 4. 固件自定义（5G+WiFi自动启动）
+        run: |
+          cd istoreos-src
+          # --------------------------
+          # 4.1 创建自启动脚本（核心逻辑）
+          # --------------------------
+          # 脚本路径：固件刷入后会在 /etc/init.d/auto-5g-wifi
+          mkdir -p files/etc/init.d/
+          cat > files/etc/init.d/auto-5g-wifi << 'EOF'
+          #!/bin/sh /etc/rc.common
+          # 自启动脚本：开机启动5G + 开启WiFi热点
+
+          START=99  # 启动优先级（99表示较晚启动，确保驱动加载完成）
+          STOP=10
+
+          # 5G模块启动函数（需根据 XGP 5G模块型号调整！）
+          start_5g() {
+            echo "正在启动5G模块..."
+            # 示例：基于 qmi-utils 的5G启动命令（常见于高通5G模块）
+            # 1. 确认5G设备节点（XGP通常为 /dev/cdc-wdm0，需实际验证）
+            if [ ! -e /dev/cdc-wdm0 ]; then
+              echo "5G模块设备节点不存在，启动失败！"
+              return 1
+            fi
+            # 2. 初始化5G模块（APN需根据运营商修改，如中国移动：cmnet，联通：3gnet）
+            uqmi -d /dev/cdc-wdm0 --start-network cmnet --autoconnect
+            # 3. 等待5G获取IP（延时5秒）
+            sleep 5
+            # 4. 确认5G网络状态
+            if uqmi -d /dev/cdc-wdm0 --get-data-status | grep "connected"; then
+              echo "5G模块启动成功！"
+            else
+              echo "5G模块启动失败，重试1次..."
+              uqmi -d /dev/cdc-wdm0 --stop-network --autoconnect
+              sleep 3
+              uqmi -d /dev/cdc-wdm0 --start-network cmnet --autoconnect
+            fi
+          }
+
+          # WiFi热点启动函数
+          start_wifi_hotspot() {
+            echo "正在开启WiFi热点..."
+            # 1. 启用WiFi硬件（XGP WiFi芯片通常为 radio0，需实际验证）
+            uci set wireless.radio0.disabled=0
+            # 2. 配置WiFi热点参数（SSID和密码从环境变量获取，编译时注入）
+            uci set wireless.@wifi-iface[0].ssid="${WIFI_SSID}"
+            uci set wireless.@wifi-iface[0].key="${WIFI_PASSWORD}"
+            uci set wireless.@wifi-iface[0].mode=ap  # 热点模式
+            uci set wireless.@wifi-iface[0].network=lan  # 绑定LAN网段（共享5G网络）
+            uci set wireless.@wifi-iface[0].encryption=psk2  # 加密方式（psk2最兼容）
+            # 3. 提交配置并重启WiFi服务
+            uci commit wireless
+            /etc/init.d/network restart
+            echo "WiFi热点启动成功！SSID: ${WIFI_SSID}"
+          }
+
+          # 脚本启动入口
+          start() {
+            start_5g
+            start_wifi_hotspot
+          }
+
+          # 脚本停止入口（可选）
+          stop() {
+            echo "停止5G和WiFi热点..."
+            uqmi -d /dev/cdc-wdm0 --stop-network --autoconnect
+            uci set wireless.radio0.disabled=1
+            uci commit wireless
+            /etc/init.d/network restart
+          }
+          EOF
+
+          # --------------------------
+          # 4.2 注入WiFi参数（从工作流输入获取）
+          # --------------------------
+          sed -i "s|\${WIFI_SSID}|${{ github.event.inputs.wifi_ssid }}|g" \
+            files/etc/init.d/auto-5g-wifi
+          sed -i "s|\${WIFI_PASSWORD}|${{ github.event.inputs.wifi_password }}|g" \
+            files/etc/init.d/auto-5g-wifi
+
+          # --------------------------
+          # 4.3 设置脚本权限并配置开机启动
+          # --------------------------
+          chmod +x files/etc/init.d/auto-5g-wifi
+          # 写入 rc.local，确保开机执行（兼容iStoreOS启动逻辑）
+          echo "/etc/init.d/auto-5g-wifi start" >> files/etc/rc.local
+
+          # --------------------------
+          # 4.4 确保5G/WiFi依赖包被编译（避免固件缺失工具）
+          # --------------------------
+          # 添加 qmi-utils（5G模块控制工具）、hostapd（WiFi热点服务）
+          echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
+          echo "CONFIG_PACKAGE_uqmi=y" >> .config
+          echo "CONFIG_PACKAGE_hostapd-common=y" >> .config
+          echo "CONFIG_PACKAGE_wpa-supplicant=y" >> .config
+          # 重新生成配置（静默模式）
+          make defconfig -s 2>/dev/null
+
+      ###########################################################################
+      # 步骤5：编译固件（最小化日志，仅保留关键错误）
+      ###########################################################################
+      - name: 5. 编译固件（静默模式，日志定向到文件）
+        run: |
+          cd istoreos-src
+          # 核心编译参数说明：
+          # -j$(nproc)：多线程编译（根据CPU核心数自动分配）
+          # -s：静默模式（减少90%日志输出）
+          # V=s：仅保留错误和关键信息（避免日志中断）
+          # 2>&1 | tee build.log：错误日志定向到文件，控制台仅显关键信息
+          make -j$(nproc) -s V=s 2>&1 | tee build.log
+          # 编译完成后，输出固件路径（方便后续查找）
+          echo "编译完成！固件路径："
+          find bin/targets/ -name "*.img.gz" -o -name "*.bin"
+
+      ###########################################################################
+      # 步骤6：上传编译产物（固件+日志，方便下载）
+      ###########################################################################
+      - name: 6. 上传固件和日志
+        uses: actions/upload-artifact@v4
+        with:
+          name: istoreos-xgp-firmware
+          path: |
+            istoreos-src/bin/targets/**/*.img.gz
+            istoreos-src/bin/targets/**/*.bin
+            istoreos-src/build.log  # 上传日志，方便排查编译错误
+          retention-days: 7  # 产物保留7天（可调整）
