@@ -19,7 +19,7 @@ on:
         required: true
         default: 'xgp123456'
       apn_5g:
-        description: '5G模块默认APN（未知运营商时用，移动cmnet/联通3gnet/电信ctnet）'
+        description: '5G模块默认APN（移动cmnet/联通3gnet/电信ctnet）'
         required: true
         default: 'cmnet'
 permissions:
@@ -30,37 +30,25 @@ jobs:
     name: Build iStoreOS for xgp (RK3568+FM350gl+MT7916)
     runs-on: ubuntu-22.04
     steps:
-      - name: 【深度清理】释放磁盘空间（优先清理Docker/APT）
+      # 步骤1：清理空间（适配GitHub Runner）
+      - name: 深度清理磁盘空间
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # 1. 清理Docker残留（最大空间占用项）
           sudo docker builder prune -af || true
           sudo docker rmi `docker images -q 2>/dev/null` || true
-          sudo rm -rf /var/lib/docker/volumes/* || true
-          
-          # 2. 清理系统大目录与缓存
-          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /var/tmp/*
-          sudo rm -rf /home/runner/.cache/* || true  # 用户缓存（npm/pip等）
-          
-          # 3. 精简依赖安装（RK3568 64位无需multilib）
+          sudo rm -rf /var/lib/docker/volumes/* /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /var/tmp/*
+          sudo rm -rf /home/runner/.cache/* || true
           sudo apt-get update -qq
           sudo apt-get -y purge azure-cli* docker* ghc* zulu* llvm* firefox google*
-          sudo apt-get -y install --no-install-recommends \
-            build-essential clang flex bison g++ gawk libncurses5-dev libssl-dev \
-            python3 python3-pip rsync subversion swig unzip zlib1g-dev \
-            device-tree-compiler liblz4-tool curl wget axel
+          sudo apt-get -y install --no-install-recommends build-essential clang flex bison g++ gawk libncurses5-dev libssl-dev python3 python3-pip rsync subversion swig unzip zlib1g-dev device-tree-compiler liblz4-tool curl wget axel
           sudo pip3 install pyelftools
-          
-          # 4. 彻底清理APT（释放1-2GB）
-          sudo apt-get -y autoremove --purge
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          
+          sudo apt-get -y autoremove --purge && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
           sudo timedatectl set-timezone "Asia/Shanghai"
-          df -h /  # 显示剩余空间（调试用）
+          df -h /
 
-      - name: 【补充清理】拉满空间释放（第三方工具）
+      # 步骤2：补充清理（第三方工具拉满空间）
+      - name: 补充释放空间
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: true
@@ -71,16 +59,17 @@ jobs:
           apt-cache: true
           npm-cache: true
 
-      - name: 拉取外部配置（存放智能脚本）
+      # 步骤3：拉取你的配置仓库（无任何占位符，直接用你的仓库）
+      - name: 拉取oppo77/istoreos-rk3568-build仓库（含脚本和模板）
         uses: actions/checkout@v4
         with:
-          path: config-repo
-          fetch-depth: 1
-          # 注意：此处需替换为你的仓库地址（存放5g-auto脚本的仓库）
-          repository: 你的GitHub用户名/你的配置仓库名
-          ref: main
+          path: config-repo  # 拉取到config-repo目录
+          fetch-depth: 1     # 只拉取最新1次提交（加速）
+          repository: oppo77/istoreos-rk3568-build  # 你的实际仓库地址
+          ref: main          # 你的仓库分支（与xgp.config一致）
 
-      - name: 克隆iStoreOS源码（24.10稳定版）
+      # 步骤4：克隆iStoreOS官方源码
+      - name: 克隆iStoreOS-24.10源码
         uses: actions/checkout@v4
         with:
           repository: istoreos/istoreos
@@ -88,42 +77,47 @@ jobs:
           path: openwrt
           fetch-depth: 1
 
-      - name: 配置多镜像源（清华/中科大，加速下载）
+      # 步骤5：配置多镜像源（加速依赖下载）
+      - name: 配置清华/中科大镜像源
         run: |
           cd openwrt
-          # 替换官方源为清华镜像
           sed -i 's#downloads.openwrt.org#mirrors.tuna.tsinghua.edu.cn/openwrt#g' ./feeds.conf.default
-          # 添加多镜像重试（防止单镜像失效）
           echo 'MIRRORS += https://mirrors.ustc.edu.cn/openwrt' >> ./include/download.mk
           echo 'MIRRORS += https://downloads.openwrt.org' >> ./include/download.mk
-          # 替换package中的硬编码链接
           find ./package -type f -name "Makefile" -exec sed -i 's#https://downloads.openwrt.org#$(MIRRORS)#g' {} \;
 
-      - name: 替换下载工具为多线程axel（16线程+重试）
+      # 步骤6：替换下载工具为多线程axel
+      - name: 配置axel多线程下载
         run: |
           cd openwrt
           sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 16 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' ./include/download.mk
-          echo "DOWNLOAD_TIMEOUT=600" >> ./include/download.mk  # 10分钟超时
-          echo "DOWNLOAD_RETRIES=5" >> ./include/download.mk    # 5次重试
+          echo "DOWNLOAD_TIMEOUT=600" >> ./include/download.mk
+          echo "DOWNLOAD_RETRIES=5" >> ./include/download.mk
 
-      - name: 初始化feeds并删除冲突包
+      # 步骤7：初始化feeds并清理冲突包
+      - name: 初始化feeds与清理冲突
         run: |
           cd openwrt
           ./scripts/feeds update -a
-          # 删除baidupcs-web（避免编译冲突）
           rm -rf feeds/third/luci-app-baidupcs-web package/feeds/third/luci-app-baidupcs-web 2>/dev/null || true
           rm -rf feeds/third/baidupcs-web package/feeds/third/baidupcs-web 2>/dev/null || true
           ./scripts/feeds update -a && ./scripts/feeds install -a
 
-      - name: 下载【优化后的xgp.config】（含6个关键依赖）
+      # 步骤8：下载你的xgp.config（使用你提供的raw地址）
+      - name: 下载xgp.config（oppo77仓库的raw地址）
         run: |
           cd openwrt
-          # 替换为你的xgp.config地址（如GitHub Gist/你的仓库）
-          wget --timeout=30 --tries=3 -O .config "https://raw.githubusercontent.com/你的GitHub用户名/你的配置仓库名/main/xgp.config"
-          [ -s .config ] || { echo "Error: xgp.config下载失败或为空！"; exit 1; }
-          make defconfig  # 自动补全依赖，确保配置生效
+          # 直接使用你确认的raw地址，无任何修改
+          wget --timeout=30 --tries=3 -O .config "https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp.config"
+          # 检查文件是否下载成功（避免空文件）
+          if [ ! -s .config ]; then
+            echo "错误：xgp.config下载失败或为空！请检查raw地址是否正确"
+            exit 1
+          fi
+          make defconfig  # 自动补全依赖配置
 
-      - name: 【关键】禁用LTO优化（减少30%临时空间占用）
+      # 步骤9：禁用LTO优化（解决空间不足）
+      - name: 禁用LTO链接时优化
         run: |
           cd openwrt
           if grep -q "CONFIG_LTO" .config; then
@@ -131,56 +125,62 @@ jobs:
           fi
           echo "CONFIG_LTO=n" >> .config
           echo "CONFIG_LTO_DISABLE=y" >> .config
-          grep -E "CONFIG_LTO" .config || echo "LTO已禁用"  # 验证
+          grep -E "CONFIG_LTO" .config || echo "LTO优化已成功禁用"
 
-      - name: 缓存依赖包（dl目录，每周自动更新）
+      # 步骤10：缓存依赖包（加速后续编译）
+      - name: 缓存dl目录依赖包
         uses: actions/cache@v3
         with:
           path: openwrt/dl
           key: ${{ runner.os }}-xgp-dl-${{ hashFiles('openwrt/.config') }}-${{ format('{0:YYYY-WW}', github.event.started_at) }}
           restore-keys: |
             ${{ runner.os }}-xgp-dl-${{ hashFiles('openwrt/.config') }}-
-          max-size: 8GB  # 限制缓存大小，避免占满空间
+          max-size: 8GB
 
-      - name: 多线程下载依赖包（失败时单线程排错）
+      # 步骤11：下载编译依赖包
+      - name: 多线程下载依赖包
         run: |
           cd openwrt
-          echo "16线程加速下载依赖..."
-          make download -j16 || make download -j1 V=s  # 失败时显示详细日志
-          find openwrt/dl -type f -size 0 -delete || true  # 清理空文件
+          echo "使用16线程加速下载依赖包..."
+          make download -j16 || make download -j1 V=s  # 失败时单线程排错
 
-      - name: 引入【智能5G脚本】并替换默认APN
+      # 步骤12：引入智能5G启动脚本（路径需与你的仓库一致）
+      - name: 复制并配置5G智能脚本
         run: |
           # 创建脚本目录
           mkdir -p openwrt/files/etc/init.d/
-          # 复制智能脚本（路径对应你仓库中的脚本位置）
+          # 从你的仓库复制5g-auto脚本（假设在config-files目录下）
+          # 若你的脚本实际路径是其他（如scripts/5g-auto），请修改为：cp config-repo/scripts/5g-auto ...
           cp config-repo/config-files/5g-auto openwrt/files/etc/init.d/
-          # 替换脚本中的默认APN（未知运营商时使用）
+          # 替换默认APN（用户输入的apn_5g参数）
           sed -i "s/__5G_APN__/${{ github.event.inputs.apn_5g }}/g" openwrt/files/etc/init.d/5g-auto
           # 赋予执行权限（必须，否则开机不启动）
           chmod 755 openwrt/files/etc/init.d/5g-auto
-          # 建立开机启动链接（S95：确保在网络服务后执行）
+          # 建立开机启动链接
           mkdir -p openwrt/files/etc/rc.d/
           ln -sf ../init.d/5g-auto openwrt/files/etc/rc.d/S955g-auto
 
-      - name: 引入WiFi配置并替换SSID/密码
+      # 步骤13：引入WiFi配置模板（路径需与你的仓库一致）
+      - name: 复制并配置WiFi模板
         run: |
+          # 创建WiFi配置目录
           mkdir -p openwrt/files/etc/config/
-          # 复制WiFi模板配置（路径对应你仓库中的wireless文件）
+          # 从你的仓库复制wireless模板（假设在config-files目录下）
+          # 若你的模板实际路径是其他（如scripts/wireless），请修改为：cp config-repo/scripts/wireless ...
           cp config-repo/config-files/wireless openwrt/files/etc/config/
-          # 替换2.4G SSID
+          # 替换SSID和密码（用户输入的参数）
           sed -i "s/__WIFI_2G_SSID__/${{ github.event.inputs.wifi_2g_ssid }}/g" openwrt/files/etc/config/wireless
-          # 替换5G SSID
           sed -i "s/__WIFI_5G_SSID__/${{ github.event.inputs.wifi_5g_ssid }}/g" openwrt/files/etc/config/wireless
-          # 替换WiFi密码
           sed -i "s/__WIFI_PASSWORD__/${{ github.event.inputs.wifi_password }}/g" openwrt/files/etc/config/wireless
 
-      - name: 设置LAN管理IP（用户输入的地址）
+      # 步骤14：设置LAN管理IP（用户输入的lan_ip参数）
+      - name: 配置LAN管理IP
         run: |
           cd openwrt
           sed -i "s/192\.168\.[0-9]*\.[0-9]*/${{ github.event.inputs.lan_ip }}/g" package/base-files/files/bin/config_generate
 
-      - name: 缓存工具链（加速二次编译）
+      # 步骤15：缓存工具链（加速二次编译）
+      - name: 缓存编译工具链
         uses: klever1988/cachewrtbuild@main
         with:
           ccache: 'true'
@@ -188,25 +188,30 @@ jobs:
           prefix: ${{ github.workspace }}/openwrt
           max-size: 5GB
 
-      - name: 编译固件（2线程平衡速度与稳定性）
+      # 步骤16：编译固件（2线程平衡稳定性）
+      - name: 编译iStoreOS固件
         run: |
           cd openwrt
-          echo "使用2线程编译..."
+          echo "使用2线程编译固件..."
           make -j2 || make -j1 V=s  # 失败时单线程输出详细日志
 
-      - name: 清理临时文件（释放空间，便于打包）
+      # 步骤17：清理临时文件（便于打包）
+      - name: 清理编译临时文件
         run: |
-          sudo rm -rf openwrt/logs/* || true  # 编译日志（1-2GB）
-          sudo rm -rf openwrt/build_dir/target-*/tmp/* || true  # 临时文件
+          sudo rm -rf openwrt/logs/* || true
+          sudo rm -rf openwrt/build_dir/target-*/tmp/* || true
 
-      - name: 整理固件产物（只保留镜像，删除冗余packages）
+      # 步骤18：整理固件产物（只保留镜像）
+      - name: 整理固件文件
         run: |
           mkdir -p ./final-firmware
           cp -rf openwrt/bin/targets/rockchip/armv8/* ./final-firmware/
-          rm -rf ./final-firmware/packages  # 删除packages目录（3-4GB）
+          rm -rf ./final-firmware/packages  # 删除冗余packages目录
 
-      - name: 上传固件到Artifact（便于下载）
+      # 步骤19：上传固件到Artifact（便于下载）
+      - name: 上传固件到Artifact
         uses: actions/upload-artifact@v4
         with:
           name: iStoreOS-xgp-Firmware-${{ github.run_id }}
           path: ./final-firmware/
+          retention-days: 30  # 固件保留30天
