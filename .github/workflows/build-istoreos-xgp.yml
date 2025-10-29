@@ -1278,4 +1278,4 @@ EOF
         if: env.UPLOAD_RELEASE == 'true' && !cancelled()
         with:
           keep_latest: 6
-          delete_tags: true  # 同时删除对应的标签
+          delete_tags: true  #  同时删除对应的标签
