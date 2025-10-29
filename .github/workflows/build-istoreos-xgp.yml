@@ -1,107 +1,163 @@
-name: 【终极版】编译 iStoreOS（XGP）- 跳过依赖检查
+name: 编译 XGP 专属 iStoreOS（24.10）- 自动启5G+WiFi
 
 on:
   workflow_dispatch:
     inputs:
-      istoreos_branch:
-        description: 'iStoreOS 源码分支'
+      lan_ip:
+        description: 'LAN 管理IP'
         required: true
-        default: 'main'
+        default: '192.168.10.1'
+      os_name:
+        description: '系统名称'
+        required: true
+        default: 'XGP-iStoreOS'
       wifi_ssid:
         description: 'WiFi热点名称'
         required: true
         default: 'XGP-5G-Hotspot'
       wifi_password:
-        description: 'WiFi密码'
+        description: 'WiFi密码（8-63位）'
         required: true
         default: 'XGP123456'
+      ssh:
+        description: 'SSH连接调试（可选）'
+        required: false
+        default: 'false'
+
+env:
+  REPO_URL: https://github.com/istoreos/istoreos
+  REPO_BRANCH: istoreos-24.10  # 参考工作流的稳定分支
+  CONFIG_FILE: .config  # 你的XGP.config文件名
+  WORK_DIR: /mnt/workdir
+  UPLOAD_FIRMWARE: true
+  TZ: Asia/Shanghai
+  GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN }}
 
 jobs:
-  build-final:
-    runs-on: ubuntu-latest
+  build-xgp:
+    runs-on: ubuntu-22.04  # 参考工作流的稳定系统版本
+    strategy:
+      matrix:
+        # XGP 多为 rk3568 芯片，对应 rk35xx 架构（根据实际调整）
+        ARCHITECTURE: [rk35xx-24.10]
+      fail-fast: false  # 单个架构失败不影响其他（此处仅一个架构）
+
     steps:
       ###########################################################################
-      # 步骤1：安装核心依赖 + 确认Python3环境（确保实际能用）
+      # 步骤1：基础准备（参考工作流逻辑）
       ###########################################################################
-      - name: 1. 安装依赖 + 验证Python3（确保可用）
+      - name: 1. 准备完成
+        uses: actions/checkout@main
+
+      - name: 2. 检查服务器配置（避免性能不足）
         run: |
-          # 安装所有必需依赖（含Python3完整组件）
-          sudo apt update -qq
-          sudo apt install -yq \
-            python3 python3-pip python3-distutils python3-setuptools python3-pyelftools \
-            build-essential git libncurses5-dev zlib1g-dev libssl-dev flex bison \
-            rsync wget file which sed grep
+          echo "若CPU/内存不足，建议取消后重新触发！"
+          echo "CPU核心：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c)"
+          echo "内存信息：" && sudo lshw -short -C memory | grep GiB
+          echo "磁盘空间：" && df -Th
 
-          # 最后一次验证：确保Python3和distutils能正常用（实际编译需要）
-          echo "=== 最终Python3验证 ==="
-          python3 --version  # 必须显示 3.8+
-          python3 -c "import distutils; print('distutils可用，路径：', distutils.__file__)"  # 无报错则实际可用
-          echo "=== Python3环境确认正常 ==="
+      - name: 3. 安装 Go（iStoreOS 24.10 依赖）
+        uses: actions/setup-go@v1
+        with:
+          go-version: 1.21.1  # 参考工作流的稳定版本
 
       ###########################################################################
-      # 步骤2：拉取源码 + 修改 Makefile（核心！删除依赖检查调用）
+      # 步骤2：初始化编译环境（关键！借鉴参考流解决Python问题）
       ###########################################################################
-      - name: 2. 拉取源码 + 修改 Makefile 跳过检查
+      - name: 4. 初始化环境（修复Python路径+清理冲突）
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          # 拉取源码
-          git clone --depth=1 -b ${{ github.event.inputs.istoreos_branch }} \
-            https://github.com/istoreos/istoreos.git istoreos-src
-          cd istoreos-src
-
-          # 关键操作：修改顶层 Makefile，注释掉调用依赖检查脚本的代码
-          # iStoreOS 的 Makefile 中，依赖检查通常在 "prereq" 目标或开头位置
-          MAKEFILE="Makefile"
-          echo "=== 正在修改 Makefile，删除依赖检查调用 ==="
-
-          # 1. 查找并注释掉调用 check-prereq-build.py 的行（两种常见写法都覆盖）
-          # 写法1：$(TOPDIR)/scripts/check-prereq-build.py
-          sudo sed -i 's|$(TOPDIR)/scripts/check-prereq-build.py|# &|g' $MAKEFILE
-          # 写法2：scripts/check-prereq-build.py
-          sudo sed -i 's|scripts/check-prereq-build.py|# &|g' $MAKEFILE
-
-          # 2. 查找并注释掉依赖检查相关的 "prereq" 目标（若存在）
-          sudo sed -i '/prereq.*check-prereq/s|^|# |g' $MAKEFILE
-
-          # 验证修改结果：确认检查脚本调用已被注释
-          echo -e "\n=== 修改后 Makefile 关键内容（确认无检查调用） ==="
-          grep -n "check-prereq-build.py" $MAKEFILE  # 输出应带 # 注释符
-          grep -n "prereq" $MAKEFILE | head -10  # 查看 prereq 目标是否被注释
-
-      ###########################################################################
-      # 步骤3：导入XGP配置 + 生成配置（无检查，直接执行）
-      ###########################################################################
-      - name: 3. 导入配置 + 生成配置（无依赖检查）
-        run: |
-          cd istoreos-src
-          # 导入你的XGP配置
-          wget -q -O .config https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/XGP.config
+          # 1. 清理旧源和冲突软件（避免依赖干扰，参考工作流核心步骤）
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /etc/mysql /etc/php
+          sudo rm -rf /usr/local/lib/android /opt/ghc
           
-          # 直接生成配置，无需检查（此时Makefile已无检查调用）
-          make defconfig -s 2>/dev/null
-          echo "配置生成完成（无依赖检查）"
+          # 2. 静默更新并安装依赖（整合用户之前的需求+参考流）
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install \
+            build-essential git libncurses5-dev zlib1g-dev libssl-dev flex bison \
+            rsync wget file which sed grep python3 python3-pip python3-distutils \
+            python3-setuptools python3-pyelftools gcc-multilib g++-multilib \
+            subversion unzip p7zip p7zip-full device-tree-compiler u-boot-tools
+          
+          # 3. 用官方脚本安装pip3（修复apt安装的路径问题，参考流关键操作）
+          wget https://bootstrap.pypa.io/pip/3.6/get-pip.py
+          sudo python3 get-pip.py  # 强制用python3执行，确保路径正确
+          sudo rm -rf get-pip.py
+          
+          # 4. 安装Python依赖（双重保险）
+          sudo pip3 install --upgrade pip
+          sudo pip3 install pyelftools distutils setuptools
+          
+          # 5. 清理空间（避免磁盘不足，参考流逻辑）
+          docker rmi `docker images -q` 2>/dev/null || true
+          docker image prune -a -f 2>/dev/null || true
+          sudo -E apt-get -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* || true
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          
+          # 6. 设置工作目录及时区
+          sudo timedatectl set-timezone "$TZ"
+          sudo mkdir -p $WORK_DIR
+          sudo chown $USER:$GROUPS $WORK_DIR
 
       ###########################################################################
-      # 步骤4：固件自定义（5G+WiFi自动启动）
+      # 步骤3：拉取源码+配置（适配XGP）
       ###########################################################################
-      - name: 4. 固件自定义（5G+WiFi自动启动）
+      - name: 5. 克隆 iStoreOS 源码
+        working-directory: $WORK_DIR
         run: |
-          cd istoreos-src
+          git clone $REPO_URL -b $REPO_BRANCH openwrt
+          ln -sf $WORK_DIR/openwrt $GITHUB_WORKSPACE/openwrt  # 创建软链接，方便后续操作
+
+      - name: 6. 缓存构建（加速编译，参考流逻辑）
+        uses: klever1988/cachewrtbuild@main
+        with:
+          ccache: 'true'
+          mixkey: ${{ runner.os }}-${{ matrix.ARCHITECTURE }}-${{ REPO_BRANCH }}
+          prefix: ${{ github.workspace }}/openwrt
+
+      - name: 7. 加载 XGP 配置文件（你的专属config）
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          # 下载你的XGP.config（替换为实际路径，建议放在仓库的对应架构目录下）
+          wget -q -O $CONFIG_FILE https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/${{ matrix.ARCHITECTURE }}/$CONFIG_FILE
+          # 生成初始配置（此时Python环境已正确，检查脚本可通过）
+          make defconfig -s 2>/dev/null
+
+      ###########################################################################
+      # 步骤4：自定义配置（LAN IP+系统名+5G/WiFi自启动）
+      ###########################################################################
+      - name: 8. 设置 LAN IP 和系统名称
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          # 设置LAN IP
+          sed -i "s/192\.168\.[0-9]*\.[0-9]*/${{ github.event.inputs.lan_ip }}/g" package/base-files/files/bin/config_generate
+          # 设置系统名称
+          sed -i "s/OpenWrt/${{ github.event.inputs.os_name }}/g" package/base-files/files/bin/config_generate
+
+      - name: 9. 添加 5G+WiFi 自启动脚本（核心功能）
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          # 创建自启动脚本目录
           mkdir -p files/etc/init.d/
+          # 写入自启动脚本
           cat > files/etc/init.d/auto-5g-wifi << 'EOF'
           #!/bin/sh /etc/rc.common
-          START=99
+          START=99  # 晚启动，确保驱动加载完成
           STOP=10
 
           start_5g() {
-            echo "启动5G模块..."
+            echo "启动XGP 5G模块..."
             if [ ! -e /dev/cdc-wdm0 ]; then
-              echo "5G设备节点不存在，检查驱动是否加载"
+              echo "5G设备节点缺失，检查驱动！"
               return 1
             fi
+            # 运营商APN（根据实际修改：移动cmnet/联通3gnet/电信ctnet）
             uqmi -d /dev/cdc-wdm0 --start-network cmnet --autoconnect
             sleep 5
             if uqmi -d /dev/cdc-wdm0 --get-data-status | grep "connected"; then
-              echo "5G启动成功"
+              echo "5G启动成功！"
             else
               echo "重试5G连接..."
               uqmi -d /dev/cdc-wdm0 --stop-network --autoconnect
@@ -110,9 +166,11 @@ jobs:
             fi
           }
 
-          start_wifi_hotspot() {
+          start_wifi() {
             echo "开启WiFi热点..."
-            uci set wireless.radio0.disabled=0
+            # 启用WiFi（XGP 5G频段通常为radio1，2.4G为radio0，根据实际调整）
+            uci set wireless.radio1.disabled=0
+            # 配置热点参数（从环境变量注入）
             uci set wireless.@wifi-iface[0].ssid="${WIFI_SSID}"
             uci set wireless.@wifi-iface[0].key="${WIFI_PASSWORD}"
             uci set wireless.@wifi-iface[0].mode=ap
@@ -125,63 +183,72 @@ jobs:
 
           start() {
             start_5g
-            start_wifi_hotspot
+            start_wifi
           }
 
           stop() {
             echo "停止5G和WiFi..."
             uqmi -d /dev/cdc-wdm0 --stop-network --autoconnect
-            uci set wireless.radio0.disabled=1
+            uci set wireless.radio1.disabled=1
             uci commit wireless
             /etc/init.d/network restart
           }
           EOF
 
-          # 注入WiFi参数
-          sed -i "s|\${WIFI_SSID}|${{ github.event.inputs.wifi_ssid }}|g" \
-            files/etc/init.d/auto-5g-wifi
-          sed -i "s|\${WIFI_PASSWORD}|${{ github.event.inputs.wifi_password }}|g" \
-            files/etc/init.d/auto-5g-wifi
+          # 注入WiFi参数（从工作流输入获取）
+          sed -i "s|\${WIFI_SSID}|${{ github.event.inputs.wifi_ssid }}|g" files/etc/init.d/auto-5g-wifi
+          sed -i "s|\${WIFI_PASSWORD}|${{ github.event.inputs.wifi_password }}|g" files/etc/init.d/auto-5g-wifi
 
-          # 配置开机启动
+          # 设置脚本权限并开机启动
           chmod +x files/etc/init.d/auto-5g-wifi
           echo "/etc/init.d/auto-5g-wifi start" >> files/etc/rc.local
 
-          # 补充5G/WiFi依赖包 + 生成配置
-          echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
-          echo "CONFIG_PACKAGE_uqmi=y" >> .config
-          echo "CONFIG_PACKAGE_hostapd-common=y" >> .config
+          # 确保5G/WiFi依赖包编译进固件
+          echo "CONFIG_PACKAGE_qmi-utils=y" >> $CONFIG_FILE
+          echo "CONFIG_PACKAGE_uqmi=y" >> $CONFIG_FILE
+          echo "CONFIG_PACKAGE_hostapd-common=y" >> $CONFIG_FILE
+          # 重新生成配置（静默模式）
           make defconfig -s 2>/dev/null
 
       ###########################################################################
-      # 步骤5：编译固件（无检查，静默模式）
+      # 步骤5：编译固件（减少日志+失败降级）
       ###########################################################################
-      - name: 5. 编译固件（无依赖检查，减少日志）
+      - name: 10. 下载软件包（提前缓存，减少编译中断）
         run: |
-          cd istoreos-src
-          # 直接编译，此时已无任何依赖检查
-          make -j$(nproc) -s V=s 2>&1 | tee build.log
-          
-          # 显示结果
-          echo -e "\n=== 编译结果 ==="
-          FIRMWARE=$(find bin/targets/ -name "*.img.gz" -o -name "*.bin")
-          if [ -n "$FIRMWARE" ]; then
-            echo "编译成功！固件路径："
-            echo "$FIRMWARE"
-          else
-            echo "编译失败，最后50行日志："
-            tail -50 build.log
-          fi
+          cd $GITHUB_WORKSPACE/openwrt
+          make download -j8  # 多线程下载，快速完成
+          # 删除过小文件（避免下载不完整导致编译失败）
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: 11. 编译固件（减少日志，失败才显示详情）
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          echo "使用 $(nproc) 线程编译..."
+          # 优先多线程快速编译（日志少），失败则单线程+详细日志（便于排查）
+          make -j$(nproc) -s V=s 2>&1 | tee build.log || \
+          make -j1 V=s 2>&1 | tee build.log.fail
+          # 记录编译时间
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
       ###########################################################################
-      # 步骤6：上传固件和日志
+      # 步骤6：上传产物（保留固件+日志）
       ###########################################################################
-      - name: 6. 上传产物
+      - name: 12. 整理固件路径
+        id: organize
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt/bin/targets/*/*
+          rm -rf packages  # 删除冗余包，减小上传体积
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "::set-output name=status::success"
+
+      - name: 13. 上传固件和日志
         uses: actions/upload-artifact@v4
+        if: steps.organize.outputs.status == 'success' && !cancelled()
         with:
-          name: istoreos-xgp-final-firmware
+          name: XGP-iStoreOS-${{ matrix.ARCHITECTURE }}${{ env.FILE_DATE }}
           path: |
-            istoreos-src/bin/targets/**/*.img.gz
-            istoreos-src/bin/targets/**/*.bin
-            istoreos-src/build.log
+            ${{ env.FIRMWARE }}/*
+            ${{ github.workspace }}/openwrt/build.log
+            ${{ github.workspace }}/openwrt/build.log.fail*
           retention-days: 7
