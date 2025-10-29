@@ -30,7 +30,6 @@ jobs:
     name: Build iStoreOS for xgp (RK3568+FM350gl+MT7916)
     runs-on: ubuntu-22.04
     steps:
-      # 步骤1：清理空间（适配GitHub Runner）
       - name: 深度清理磁盘空间
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -46,8 +45,6 @@ jobs:
           sudo apt-get -y autoremove --purge && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
           sudo timedatectl set-timezone "Asia/Shanghai"
           df -h /
-
-      # 步骤2：补充清理（第三方工具拉满空间）
       - name: 补充释放空间
         uses: jlumbroso/free-disk-space@main
         with:
@@ -58,17 +55,13 @@ jobs:
           swap-storage: true
           apt-cache: true
           npm-cache: true
-
-      # 步骤3：拉取你的配置仓库（无任何占位符，直接用你的仓库）
       - name: 拉取oppo77/istoreos-rk3568-build仓库（含脚本和模板）
         uses: actions/checkout@v4
         with:
-          path: config-repo  # 拉取到config-repo目录
-          fetch-depth: 1     # 只拉取最新1次提交（加速）
-          repository: oppo77/istoreos-rk3568-build  # 你的实际仓库地址
-          ref: main          # 你的仓库分支（与xgp.config一致）
-
-      # 步骤4：克隆iStoreOS官方源码
+          path: config-repo
+          fetch-depth: 1
+          repository: oppo77/istoreos-rk3568-build
+          ref: main
       - name: 克隆iStoreOS-24.10源码
         uses: actions/checkout@v4
         with:
@@ -76,8 +69,6 @@ jobs:
           ref: istoreos-24.10
           path: openwrt
           fetch-depth: 1
-
-      # 步骤5：配置多镜像源（加速依赖下载）
       - name: 配置清华/中科大镜像源
         run: |
           cd openwrt
@@ -85,16 +76,12 @@ jobs:
           echo 'MIRRORS += https://mirrors.ustc.edu.cn/openwrt' >> ./include/download.mk
           echo 'MIRRORS += https://downloads.openwrt.org' >> ./include/download.mk
           find ./package -type f -name "Makefile" -exec sed -i 's#https://downloads.openwrt.org#$(MIRRORS)#g' {} \;
-
-      # 步骤6：替换下载工具为多线程axel
       - name: 配置axel多线程下载
         run: |
           cd openwrt
           sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 16 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' ./include/download.mk
           echo "DOWNLOAD_TIMEOUT=600" >> ./include/download.mk
           echo "DOWNLOAD_RETRIES=5" >> ./include/download.mk
-
-      # 步骤7：初始化feeds并清理冲突包
       - name: 初始化feeds与清理冲突
         run: |
           cd openwrt
@@ -102,21 +89,15 @@ jobs:
           rm -rf feeds/third/luci-app-baidupcs-web package/feeds/third/luci-app-baidupcs-web 2>/dev/null || true
           rm -rf feeds/third/baidupcs-web package/feeds/third/baidupcs-web 2>/dev/null || true
           ./scripts/feeds update -a && ./scripts/feeds install -a
-
-      # 步骤8：下载你的xgp.config（使用你提供的raw地址）
       - name: 下载xgp.config（oppo77仓库的raw地址）
         run: |
           cd openwrt
-          # 直接使用你确认的raw地址，无任何修改
           wget --timeout=30 --tries=3 -O .config "https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp.config"
-          # 检查文件是否下载成功（避免空文件）
           if [ ! -s .config ]; then
             echo "错误：xgp.config下载失败或为空！请检查raw地址是否正确"
             exit 1
           fi
-          make defconfig  # 自动补全依赖配置
-
-      # 步骤9：禁用LTO优化（解决空间不足）
+          make defconfig
       - name: 禁用LTO链接时优化
         run: |
           cd openwrt
@@ -126,60 +107,39 @@ jobs:
           echo "CONFIG_LTO=n" >> .config
           echo "CONFIG_LTO_DISABLE=y" >> .config
           grep -E "CONFIG_LTO" .config || echo "LTO优化已成功禁用"
-
-      # 步骤10：缓存依赖包（加速后续编译）
       - name: 缓存dl目录依赖包
         uses: actions/cache@v3
         with:
           path: openwrt/dl
-          key: ${{ runner.os }}-xgp-dl-${{ hashFiles('openwrt/.config') }}-${{ format('{0:YYYY-WW}', github.event.started_at) }}
+          # 修复：用github.run_date（预定义变量，非Null）替代github.event.started_at，格式改为YYYY-MM-DD
+          key: ${{ runner.os }}-xgp-dl-${{ hashFiles('openwrt/.config') }}-${{ github.run_date }}
           restore-keys: |
             ${{ runner.os }}-xgp-dl-${{ hashFiles('openwrt/.config') }}-
           max-size: 8GB
-
-      # 步骤11：下载编译依赖包
       - name: 多线程下载依赖包
         run: |
           cd openwrt
           echo "使用16线程加速下载依赖包..."
-          make download -j16 || make download -j1 V=s  # 失败时单线程排错
-
-      # 步骤12：引入智能5G启动脚本（路径需与你的仓库一致）
+          make download -j16 || make download -j1 V=s
       - name: 复制并配置5G智能脚本
         run: |
-          # 创建脚本目录
           mkdir -p openwrt/files/etc/init.d/
-          # 从你的仓库复制5g-auto脚本（假设在config-files目录下）
-          # 若你的脚本实际路径是其他（如scripts/5g-auto），请修改为：cp config-repo/scripts/5g-auto ...
           cp config-repo/config-files/5g-auto openwrt/files/etc/init.d/
-          # 替换默认APN（用户输入的apn_5g参数）
           sed -i "s/__5G_APN__/${{ github.event.inputs.apn_5g }}/g" openwrt/files/etc/init.d/5g-auto
-          # 赋予执行权限（必须，否则开机不启动）
           chmod 755 openwrt/files/etc/init.d/5g-auto
-          # 建立开机启动链接
           mkdir -p openwrt/files/etc/rc.d/
           ln -sf ../init.d/5g-auto openwrt/files/etc/rc.d/S955g-auto
-
-      # 步骤13：引入WiFi配置模板（路径需与你的仓库一致）
       - name: 复制并配置WiFi模板
         run: |
-          # 创建WiFi配置目录
           mkdir -p openwrt/files/etc/config/
-          # 从你的仓库复制wireless模板（假设在config-files目录下）
-          # 若你的模板实际路径是其他（如scripts/wireless），请修改为：cp config-repo/scripts/wireless ...
           cp config-repo/config-files/wireless openwrt/files/etc/config/
-          # 替换SSID和密码（用户输入的参数）
           sed -i "s/__WIFI_2G_SSID__/${{ github.event.inputs.wifi_2g_ssid }}/g" openwrt/files/etc/config/wireless
           sed -i "s/__WIFI_5G_SSID__/${{ github.event.inputs.wifi_5g_ssid }}/g" openwrt/files/etc/config/wireless
           sed -i "s/__WIFI_PASSWORD__/${{ github.event.inputs.wifi_password }}/g" openwrt/files/etc/config/wireless
-
-      # 步骤14：设置LAN管理IP（用户输入的lan_ip参数）
       - name: 配置LAN管理IP
         run: |
           cd openwrt
           sed -i "s/192\.168\.[0-9]*\.[0-9]*/${{ github.event.inputs.lan_ip }}/g" package/base-files/files/bin/config_generate
-
-      # 步骤15：缓存工具链（加速二次编译）
       - name: 缓存编译工具链
         uses: klever1988/cachewrtbuild@main
         with:
@@ -187,31 +147,23 @@ jobs:
           mixkey: ${{ runner.os }}-xgp-24.10
           prefix: ${{ github.workspace }}/openwrt
           max-size: 5GB
-
-      # 步骤16：编译固件（2线程平衡稳定性）
       - name: 编译iStoreOS固件
         run: |
           cd openwrt
           echo "使用2线程编译固件..."
-          make -j2 || make -j1 V=s  # 失败时单线程输出详细日志
-
-      # 步骤17：清理临时文件（便于打包）
+          make -j2 || make -j1 V=s
       - name: 清理编译临时文件
         run: |
           sudo rm -rf openwrt/logs/* || true
           sudo rm -rf openwrt/build_dir/target-*/tmp/* || true
-
-      # 步骤18：整理固件产物（只保留镜像）
       - name: 整理固件文件
         run: |
           mkdir -p ./final-firmware
           cp -rf openwrt/bin/targets/rockchip/armv8/* ./final-firmware/
-          rm -rf ./final-firmware/packages  # 删除冗余packages目录
-
-      # 步骤19：上传固件到Artifact（便于下载）
+          rm -rf ./final-firmware/packages
       - name: 上传固件到Artifact
         uses: actions/upload-artifact@v4
         with:
           name: iStoreOS-xgp-Firmware-${{ github.run_id }}
           path: ./final-firmware/
-          retention-days: 30  # 固件保留30天
+          retention-days: 30
