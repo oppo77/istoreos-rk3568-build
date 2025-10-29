@@ -20,13 +20,39 @@ jobs:
   build-istoreos-xgp:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 安装编译依赖（静默模式）
+      ###########################################################################
+      # 核心：整合所有依赖包，静默安装（减少日志）
+      ###########################################################################
+      - name: 1. 完整依赖安装（含系统更新）
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -yq \
-            git gcc g++ make libncurses5-dev libz-dev libssl-dev \
-            python3 python3-pip unzip wget curl file subversion \
-            flex bison bc dwarves rsync libelf-dev
+          # 静默更新系统（-qq 减少日志，-y 自动确认）
+          sudo apt update -qq
+          sudo apt full-upgrade -yq
+          
+          # 安装所有指定依赖包（去重整合，-yq 自动确认）
+          sudo apt install -yq \
+            # 基础编译工具
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            # 版本控制与文件处理
+            git subversion mercurial bzr cvs unzip p7zip p7zip-full rsync wget curl \
+            # 库文件与开发依赖
+            libncurses5-dev libncursesw5-dev zlib1g-dev libssl-dev libelf-dev \
+            lib32z1 lib32z1-dev liblz4-tool libc6-dev libc6-dev-i386 libfuse-dev \
+            libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libreadline-dev \
+            libpython3-dev libnsl-dev libxml-parser-perl \
+            # Python 相关
+            python3 python3-pip python3-setuptools python3-yaml python3-serial python3-pyelftools \
+            # 工具类
+            gettext xsltproc ecj quilt device-tree-compiler u-boot-tools libtool \
+            ack antlr3 asciidoc autoconf automake autopoint binutils ccache cmake cpio \
+            genisoimage gperf haveged help2man intltool lrzsz llvm ninja-build patch \
+            pkgconf qemu-utils scons squashfs-tools swig texinfo uglifyjs upx-ucl \
+            vim xmlto xxd file which
+          
+          # 验证关键依赖（可选，快速确认环境）
+          echo "Python3 版本：$(python3 --version)"
+          echo "GCC 版本：$(gcc --version | head -1)"
+          echo "依赖安装完成"
 
       - name: 2. 拉取 iStoreOS 源码
         run: |
@@ -34,18 +60,15 @@ jobs:
             https://github.com/istoreos/istoreos.git istoreos-src
           cd istoreos-src
 
-      - name: 3. 导入 XGP 硬件配置（使用你的 config 文件）
+      - name: 3. 导入 XGP 硬件配置（你的 config 文件）
         run: |
           cd istoreos-src
-          # 替换为你的 XGP.config 链接
           wget -q -O .config https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/XGP.config
-          # 静默修复配置依赖
           make defconfig -s 2>/dev/null
 
       - name: 4. 固件自定义（5G+WiFi自动启动）
         run: |
           cd istoreos-src
-          # 创建自启动脚本
           mkdir -p files/etc/init.d/
           cat > files/etc/init.d/auto-5g-wifi << 'EOF'
           #!/bin/sh /etc/rc.common
@@ -54,12 +77,11 @@ jobs:
 
           start_5g() {
             echo "启动5G模块..."
-            # 适配XGP设备的5G启动逻辑（需根据实际模块调整）
             if [ ! -e /dev/cdc-wdm0 ]; then
               echo "5G设备节点不存在，检查驱动是否加载"
               return 1
             fi
-            # APN根据运营商修改（移动cmnet/联通3gnet/电信ctnet）
+            # 按运营商修改APN（移动cmnet/联通3gnet/电信ctnet）
             uqmi -d /dev/cdc-wdm0 --start-network cmnet --autoconnect
             sleep 5
             if uqmi -d /dev/cdc-wdm0 --get-data-status | grep "connected"; then
@@ -74,9 +96,8 @@ jobs:
 
           start_wifi_hotspot() {
             echo "开启WiFi热点..."
-            # 启用WiFi（XGP的WiFi节点可能为radio0/radio1，需验证）
+            # 若XGP WiFi为5G频段，需将radio0改为radio1（需实际验证）
             uci set wireless.radio0.disabled=0
-            # 配置热点参数
             uci set wireless.@wifi-iface[0].ssid="${WIFI_SSID}"
             uci set wireless.@wifi-iface[0].key="${WIFI_PASSWORD}"
             uci set wireless.@wifi-iface[0].mode=ap
@@ -111,7 +132,7 @@ jobs:
           chmod +x files/etc/init.d/auto-5g-wifi
           echo "/etc/init.d/auto-5g-wifi start" >> files/etc/rc.local
 
-          # 确保依赖包被编译（根据XGP.config补充）
+          # 确保5G/WiFi依赖包编译进固件
           echo "CONFIG_PACKAGE_qmi-utils=y" >> .config
           echo "CONFIG_PACKAGE_uqmi=y" >> .config
           echo "CONFIG_PACKAGE_hostapd-common=y" >> .config
@@ -120,10 +141,10 @@ jobs:
       - name: 5. 编译固件（静默模式，减少日志）
         run: |
           cd istoreos-src
-          # 静默编译，仅输出关键错误
+          # -s 静默编译，V=s 仅输出错误，日志定向到文件
           make -j$(nproc) -s V=s 2>&1 | tee build.log
-          # 显示固件路径
-          echo "固件路径："
+          # 输出固件路径，方便确认
+          echo "编译完成！固件路径："
           find bin/targets/ -name "*.img.gz" -o -name "*.bin"
 
       - name: 6. 上传固件和日志
