@@ -1,7 +1,0 @@
-#!/bin/sh
-
-if [ "$ACTION" = "add" ] && [ -n "$(echo $PRODUCT | grep -i '2c7c:0801\|2c7c:0125')" ]; then
-    echo "检测到5G模块插入，启动自动连接..."
-    sleep 5
-    /usr/bin/5g-auto-start.sh &
-fi
