@@ -6,6 +6,7 @@ env:
   FIRMWARE_DIR: "./istoreos/bin/targets/rockchip/armv8"
   CCACHE_DIR: "./.ccache"
   LOG_DIR: "./build-logs"
+  BUILD_VERSION: "v1.0.0"
 
 on:
   workflow_dispatch:
@@ -13,28 +14,33 @@ on:
       wifi_2g_ssid:
         description: "2.4G WiFi名称"
         required: true
-        default: "iStoreOS-2.4G"
+        default: "XGP-2.4G-Hotspot"
       wifi_2g_pass:
         description: "2.4G WiFi密码（8-63位）"
         required: true
-        default: "12345678"
+        default: "xgp123456"
       wifi_5g_ssid:
         description: "5G WiFi名称"
         required: true
-        default: "iStoreOS-5G"
+        default: "XGP-5G-Hotspot"
       wifi_5g_pass:
         description: "5G WiFi密码（8-63位）"
         required: true
-        default: "12345678"
+        default: "xgp123456"
       apn_5g:
         description: "5G模块APN"
         required: true
         default: "cmnet"
+      enable_port_forwarding:
+        description: "是否启用网口转发"
+        required: true
+        type: boolean
+        default: true
 
 jobs:
   build-istoreos:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     
     steps:
       - name: 1. 预先创建日志目录
@@ -57,7 +63,7 @@ jobs:
             find custom-files -type f
           else
             echo "❌ custom-files 目录不存在！"
-            mkdir -p custom-files/{usr/bin,etc/{init.d,hotplug.d/usb,config}}
+            mkdir -p custom-files/{etc/init.d,config}
             echo "✅ 已创建基础目录结构"
           fi
 
@@ -110,82 +116,7 @@ jobs:
             exit 1
           fi
 
-      - name: 8. 集成5G自动启动和WiFi配置
-        run: |
-          cd istoreos
-          mkdir -p files/usr/bin files/etc/init.d files/etc/hotplug.d/usb files/etc/config
-          
-          if [ ! -f "../custom-files/usr/bin/5g-auto-start.sh" ]; then
-            echo "⚠️  自定义文件不存在，创建基础版本..."
-            cat > files/usr/bin/5g-auto-start.sh << 'EOF'
-#!/bin/bash
-echo "5G自动启动脚本占位符 - 请配置完整的custom-files目录"
-echo "WiFi SSID: ${{ github.event.inputs.wifi_2g_ssid }} / ${{ github.event.inputs.wifi_5g_ssid }}"
-EOF
-            chmod +x files/usr/bin/5g-auto-start.sh
-            
-            cat > files/etc/init.d/5g-auto << 'EOF'
-#!/bin/sh /etc/rc.common
-START=99
-start() { echo "5G服务启动"; }
-stop() { echo "5G服务停止"; }
-EOF
-            chmod +x files/etc/init.d/5g-auto
-          else
-            cp ../custom-files/usr/bin/5g-auto-start.sh files/usr/bin/
-            chmod +x files/usr/bin/5g-auto-start.sh
-            cp ../custom-files/etc/init.d/5g-auto files/etc/init.d/
-            chmod +x files/etc/init.d/5g-auto
-            if [ -f "../custom-files/etc/hotplug.d/usb/30-5g-modem" ]; then
-              cp ../custom-files/etc/hotplug.d/usb/30-5g-modem files/etc/hotplug.d/usb/
-              chmod +x files/etc/hotplug.d/usb/30-5g-modem
-            fi
-          fi
-          
-          # 创建WiFi配置 - 简化版本，避免复杂语法
-          cat > files/etc/config/wireless << "ENDOFFILE"
-config wifi-device 'radio0'
-    option type 'mac80211'
-    option path 'platform/soc/fe300000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0'
-    option channel '11'
-    option band '2g'
-    option htmode 'HT20'
-    option country 'CN'
-    option disabled '0'
-
-config wifi-iface 'default_radio0'
-    option device 'radio0'
-    option network 'lan'
-    option mode 'ap'
-    option ssid 'iStoreOS-2.4G'
-    option encryption 'psk2'
-    option key '12345678'
-
-config wifi-device 'radio1'
-    option type 'mac80211'
-    option path 'platform/soc/fe300000.pcie/pci0000:00/0000:00:01.0/0000:02:00.0'
-    option channel '36'
-    option band '5g'
-    option htmode 'HE80'
-    option country 'CN'
-    option disabled '0'
-
-config wifi-iface 'default_radio1'
-    option device 'radio1'
-    option network 'lan'
-    option mode 'ap'
-    option ssid 'iStoreOS-5G'
-    option encryption 'psk2'
-    option key '12345678'
-ENDOFFILE
-          
-          sed -i "s/iStoreOS-2.4G/${{ github.event.inputs.wifi_2g_ssid }}/g" files/etc/config/wireless
-          sed -i "s/iStoreOS-5G/${{ github.event.inputs.wifi_5g_ssid }}/g" files/etc/config/wireless
-          sed -i "s/12345678/${{ github.event.inputs.wifi_2g_pass }}/g" files/etc/config/wireless
-          
-          echo "✅ 5G自动启动和WiFi配置集成完成"
-
-      - name: 9. 下载iStoreOS配置文件
+      - name: 8. 下载iStoreOS配置文件
         run: |
           cd istoreos
           echo "下载配置文件: ${{ env.CONFIG_URL }}"
@@ -203,14 +134,17 @@ ENDOFFILE
             exit 1
           fi
 
-      - name: 10. 应用编译优化配置
+      - name: 9. 应用编译优化配置
         run: |
           cd istoreos
           echo "CONFIG_CCACHE=y" >> .config
           echo "CONFIG_BUILD_LOG=y" >> .config
+          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=8192" >> .config
+          echo "CONFIG_TARGET_ROOTFS_EXT4FS=y" >> .config
+          echo "CONFIG_TARGET_ROOTFS_EXT4FS_LABEL=\"rootfs\"" >> .config
           echo "✅ 编译优化配置应用完成"
 
-      - name: 11. 配置下载加速
+      - name: 10. 配置下载加速
         run: |
           cd istoreos
           if ! grep -q "WGET_CMD.*axel" include/download.mk; then
@@ -218,6 +152,82 @@ ENDOFFILE
           fi
           echo "DOWNLOAD_TIMEOUT=1800" >> include/download.mk
           echo "✅ 下载加速配置完成"
+
+      - name: 11. 集成5G自动启动和WiFi配置
+        run: |
+          cd istoreos
+          mkdir -p files/etc/init.d files/etc/config
+          
+          # 创建5G自动启动脚本（仅启动5G模块，不包含WiFi设置）
+          cat > files/etc/init.d/5g-auto << 'EOF'
+#!/bin/sh /etc/rc.common
+START=99
+STOP=10
+start() {
+    echo "🚀 启动5G自动启动服务"
+    # 5G模块启动命令
+    if [ -e /dev/cdc-wdm0 ]; then
+        mbimcli -d /dev/cdc-wdm0 --set-operating-mode=online
+        sleep 5
+        echo "5G模块已启动"
+    else
+        echo "❌ 5G模块设备不存在，无法启动"
+    fi
+}
+stop() {
+    echo "🛑 停止5G自动启动服务"
+    if [ -e /dev/cdc-wdm0 ]; then
+        mbimcli -d /dev/cdc-wdm0 --set-operating-mode=offline
+        echo "5G模块已停止"
+    fi
+}
+EOF
+          chmod +x files/etc/init.d/5g-auto
+          
+          # 创建WiFi配置（直接使用用户输入的SSID和密码）
+          cat > files/etc/config/wireless << "ENDOFFILE"
+config wifi-device 'radio0'
+    option type 'mac80211'
+    option path 'platform/soc/fe300000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0'
+    option channel '11'
+    option band '2g'
+    option htmode 'HT20'
+    option country 'CN'
+    option disabled '0'
+
+config wifi-iface 'default_radio0'
+    option device 'radio0'
+    option network 'lan'
+    option mode 'ap'
+    option ssid '${WIFI_2G_SSID}'
+    option encryption 'psk2'
+    option key '${WIFI_2G_PASS}'
+
+config wifi-device 'radio1'
+    option type 'mac80211'
+    option path 'platform/soc/fe300000.pcie/pci0000:00/0000:00:01.0/0000:02:00.0'
+    option channel '36'
+    option band '5g'
+    option htmode 'HE80'
+    option country 'CN'
+    option disabled '0'
+
+config wifi-iface 'default_radio1'
+    option device 'radio1'
+    option network 'lan'
+    option mode 'ap'
+    option ssid '${WIFI_5G_SSID}'
+    option encryption 'psk2'
+    option key '${WIFI_5G_PASS}'
+ENDOFFILE
+          
+          # 替换占位符
+          sed -i "s/\${WIFI_2G_SSID}/${{ github.event.inputs.wifi_2g_ssid }}/" files/etc/config/wireless
+          sed -i "s/\${WIFI_5G_SSID}/${{ github.event.inputs.wifi_5g_ssid }}/" files/etc/config/wireless
+          sed -i "s/\${WIFI_2G_PASS}/${{ github.event.inputs.wifi_2g_pass }}/" files/etc/config/wireless
+          sed -i "s/\${WIFI_5G_PASS}/${{ github.event.inputs.wifi_5g_pass }}/" files/etc/config/wireless
+          
+          echo "✅ 5G自动启动和WiFi配置集成完成"
 
       - name: 12. 预下载资源文件
         run: |
@@ -313,6 +323,7 @@ Git提交：$SHORT_SHA
 2.4G WiFi：${{ github.event.inputs.wifi_2g_ssid }}
 5G WiFi：${{ github.event.inputs.wifi_5g_ssid }}
 5G APN：${{ github.event.inputs.apn_5g }}
+启用网口转发：${{ github.event.inputs.enable_port_forwarding }}
 ======================================
 EOF
           if [ -f "MD5校验值.txt" ]; then
