@@ -1,356 +1,351 @@
-name: 编译 iStoreOS 固件（RK3568 + 5G自动启动集成）
-
-env:
-  SOURCE_REPO: "https://github.com/oppo77/istoreos-rk3568-build.git"
-  CONFIG_URL: "https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp.config"
-  FIRMWARE_DIR: "./istoreos/bin/targets/rockchip/armv8"
-  CCACHE_DIR: "./.ccache"
-  LOG_DIR: "./build-logs"
-  BUILD_VERSION: "v1.0.0"
+name: 编译 iStoreOS 固件（xgpv3.config 配置+全功能适配）
 
 on:
-  workflow_dispatch:
-    inputs:
-      wifi_2g_ssid:
-        description: "2.4G WiFi名称"
-        required: true
-        default: "XGP-2.4G-Hotspot"
-      wifi_2g_pass:
-        description: "2.4G WiFi密码（8-63位）"
-        required: true
-        default: "xgp123456"
-      wifi_5g_ssid:
-        description: "5G WiFi名称"
-        required: true
-        default: "XGP-5G-Hotspot"
-      wifi_5g_pass:
-        description: "5G WiFi密码（8-63位）"
-        required: true
-        default: "xgp123456"
-      apn_5g:
-        description: "5G模块APN"
-        required: true
-        default: "cmnet"
-      enable_port_forwarding:
-        description: "是否启用网口转发"
-        required: true
-        type: boolean
-        default: true
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-istoreos.yml'
+      - 'xgpv3.config'  # 配置文件名称更新为 xgpv3.config
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # 支持手动触发
 
 jobs:
-  build-istoreos:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 180
-    
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # 基础配置
+      TARGET_DEVICE: "rockchip_armv8"
+      TARGET_PROFILE: "DEVICE_nlnet_xiguapi-v3"
+      # WiFi 热点参数
+      HOTSPOT_SSID: "iStoreOS-5G-Hotspot"
+      HOTSPOT_PASSWORD: "12345678"
+      # WAN-LAN 转发参数
+      WAN_INTERFACE: "wwan0"
+      LAN_ZONE: "lan"
+      WAN_ZONE: "wan"
+      # feeds 源配置（用户指定）
+      FEEDS_CONF_CONTENT: |
+        src-git packages https://github.com/coolsnowwolf/packages
+        #src-git luci https://github.com/coolsnowwolf/luci.git
+        src-git luci https://github.com/coolsnowwolf/luci.git;openwrt-23.05
+        #src-git luci https://github.com/coolsnowwolf/luci.git;openwrt-24.10
+        src-git routing https://github.com/coolsnowwolf/routing
+        src-git telephony https://github.com/coolsnowwolf/telephony.git
+        #src-git helloworld https://github.com/fw876/helloworld.git
+        #src-git qmodem https://github.com/FUjr/modem_feeds.git
+        #src-git video https://github.com/openwrt/video.git
+        #src-git targets https://github.com/openwrt/targets.git
+        #src-git oldpackages http://git.openwrt.org/packages.git
+        #src-link custom /usr/src/openwrt/custom-feed
+
     steps:
-      - name: 1. 预先创建日志目录
+      ###########################################################################
+      # 步骤0：系统精简（释放磁盘空间，避免编译时空间不足）
+      ###########################################################################
+      - name: 0. 系统精简（清理冗余文件）
         run: |
-          mkdir -p ${{ env.LOG_DIR }}
-          echo "日志目录: $(pwd)/${{ env.LOG_DIR }}" > ${{ env.LOG_DIR }}/start.log
-          echo "✅ 日志目录预先创建完成"
-      
-      - name: 2. 拉取仓库代码
+          echo "=== 精简前磁盘空间状态 ==="
+          df -h
+
+          # 清理 APT 缓存和无用依赖
+          sudo apt clean && sudo apt autoclean
+          sudo apt autoremove -y --purge
+
+          # 删除大型冗余软件（与编译无关的桌面/办公工具）
+          sudo apt purge -y \
+            libreoffice* rhythmbox* totem* gnome-* thunderbird* transmission* \
+            shotwell* cheese* simple-scan* aisleriot* gnome-mines* gnome-sudoku* \
+            remmina* vinagre* xterm* yelp* zenity* snapd* flatpak*
+
+          # 清理 Snap/Flatpak 残留和临时文件
+          sudo rm -rf /var/lib/snapd /snap /var/snap /usr/lib/snapd /var/lib/flatpak
+          sudo rm -rf /var/log/*.log /var/log/*.gz /tmp/* /var/tmp/* /var/cache/*
+
+          # 清理 Docker 残留（GitHub Action 预装）
+          if command -v docker >/dev/null 2>&1; then
+            sudo systemctl stop docker && sudo rm -rf /var/lib/docker
+          fi
+
+          echo -e "\n=== 精简后磁盘空间状态 ==="
+          df -h
+
+      ###########################################################################
+      # 步骤1：检出仓库代码（含 xgpv3.config 配置文件）
+      ###########################################################################
+      - name: 1. 检出 GitHub 仓库代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 1  # 仅拉取最新提交
 
-      - name: 3. 验证目录结构
+      ###########################################################################
+      # 步骤2：安装编译依赖（全量依赖）
+      ###########################################################################
+      - name: 2. 安装 Ubuntu 编译依赖
         run: |
-          echo "当前目录结构:"
-          ls -la
-          echo "custom-files 目录结构:"
-          if [ -d "custom-files" ]; then
-            find custom-files -type f
-          else
-            echo "❌ custom-files 目录不存在！"
-            mkdir -p custom-files/{etc/init.d,config}
-            echo "✅ 已创建基础目录结构"
-          fi
+          sudo apt update -y && sudo apt full-upgrade -y
+          sudo apt install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            binutils diffutils findutils getopt coreutils make perl which \
+            git subversion rsync curl wget axel p7zip p7zip-full unzip \
+            gettext libncurses5-dev libncursesw5-dev libssl-dev libreadline-dev \
+            libpython3-dev python3 python3-pip python3-setuptools \
+            zlib1g-dev libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev \
+            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libtool libnsl-dev \
+            device-tree-compiler liblz4-tool qemu-utils squashfs-tools \
+            ccache cmake ninja-build scons swig texinfo xmlto xxd \
+            ack antlr3 asciidoc autoconf automake autopoint patch pkgconf \
+            gperf haveged help2man intltool llvm lrzsz uglifyjs upx-ucl vim
 
-      - name: 4. 初始化缓存
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.CCACHE_DIR }}
-            /var/cache/apt/archives
-            ./dl
-          key: "istoreos-${{ runner.os }}-build-cache-${{ github.sha }}"
-          restore-keys: |
-            istoreos-${{ runner.os }}-build-cache-
+          # 安装 Python 工具
+          sudo pip3 install pyelftools
 
-      - name: 5. 快速清理磁盘
+      ###########################################################################
+      # 步骤3：克隆 iStoreOS 源码 + 替换 feeds 源
+      ###########################################################################
+      - name: 3. 克隆源码并配置 feeds 源
         run: |
-          df -h /
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-          df -h /
+          # 克隆 iStoreOS 源码
+          git clone https://github.com/istoreos/istoreos.git istoreos-src
+          cd istoreos-src
+          git checkout main
 
-      - name: 6. 安装编译依赖
+          # 替换 feeds.conf.default 为用户指定源
+          mv feeds.conf.default feeds.conf.default.bak
+          echo "${FEEDS_CONF_CONTENT}" > feeds.conf.default
+          echo -e "\n当前 feeds 源配置："
+          cat feeds.conf.default
+
+          # 更新并安装 feeds 包
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      ###########################################################################
+      # 步骤4：应用 xgpv3.config 配置文件（核心变更：文件名更新）
+      ###########################################################################
+      - name: 4. 应用 xgpv3.config 配置文件
         run: |
-          sudo apt-get update -y
-          DEPS="ccache git build-essential libncurses5-dev libssl-dev flex bison make gcc g++ gettext python3 python3-pip unzip wget curl file qemu-utils libtool axel rsync"
-          sudo apt-get install -y $DEPS
-          
-          sudo /usr/sbin/update-ccache-symlinks
-          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
-          ccache -M 5G
-          ccache -s
+          # 复制配置文件（源文件已更名为 xgpv3.config）
+          cp ./xgpv3.config istoreos-src/.config  # 关键变更：文件名从 lede@xgpv3.txt 改为 xgpv3.config
+          cd istoreos-src
 
-      - name: 7. 克隆iStoreOS源码
+          # 补全配置依赖
+          make defconfig
+
+          # 验证配置是否生效
+          echo -e "\n验证关键配置："
+          grep -E "CONFIG_PACKAGE_quectel-CM-5G-M|CONFIG_PACKAGE_kmod-mt7916|CONFIG_PACKAGE_luci" .config
+
+      ###########################################################################
+      # 步骤5：添加 5G 自动拨号脚本
+      ###########################################################################
+      - name: 5. 添加 5G 自动拨号脚本
         run: |
-          if [ ! -d "istoreos/.git" ]; then
-            echo "🚀 克隆iStoreOS源码库..."
-            git clone --depth 1 --single-branch ${{ env.SOURCE_REPO }} istoreos
-            cd istoreos
-            git checkout refs/heads/main
-          else
-            echo "📥 更新iStoreOS源码库..."
-            cd istoreos
-            git pull --depth 1
-          fi
-          
-          echo "iStoreOS目录结构:"
-          ls -la
-          if [ ! -f "Makefile" ]; then
-            echo "❌ iStoreOS源码不完整，缺少Makefile"
-            exit 1
-          fi
+          cat > istoreos-src/package/base-files/files/etc/init.d/5g-auto-dial << 'EOF'
+          #!/bin/sh /etc/rc.common
+          START=95
+          STOP=10
 
-      - name: 8. 下载iStoreOS配置文件
+          start() {
+              echo "=== 启动 5G 自动拨号 ==="
+              if [ ! -x /usr/bin/quectel-CM ]; then
+                  echo "错误：未找到 quectel-CM 工具！"
+                  return 1
+              fi
+              killall -q quectel-CM
+              quectel-CM &  # 自动识别运营商
+              echo "5G 拨号进程启动，PID: $!"
+          }
+
+          stop() {
+              echo "=== 停止 5G 拨号 ==="
+              killall -q quectel-CM
+          }
+          EOF
+
+          chmod +x istoreos-src/package/base-files/files/etc/init.d/5g-auto-dial
+          cd istoreos-src
+          echo 'ln -sf /etc/init.d/5g-auto-dial /etc/rc.d/S955g-auto-dial' >> package/base-files/files/etc/rc.local
+
+      ###########################################################################
+      # 步骤6：添加 WiFi 自动识别（MT7916）+ 热点脚本
+      ###########################################################################
+      - name: 6. 添加 WiFi 自动识别与热点脚本
         run: |
-          cd istoreos
-          echo "下载配置文件: ${{ env.CONFIG_URL }}"
-          wget -q -O .config ${{ env.CONFIG_URL }} || curl -s -o .config ${{ env.CONFIG_URL }}
-          
-          if [ ! -f ".config" ]; then
-            echo "❌ 配置文件下载失败"
-            exit 1
-          fi
-          
-          if grep -q "CONFIG_TARGET_rockchip" .config; then
-            echo "✅ iStoreOS配置文件下载和验证完成"
-          else
-            echo "❌ 配置文件格式不正确"
-            exit 1
-          fi
+          cat > istoreos-src/package/base-files/files/etc/init.d/wifi-hotspot-auto << 'EOF'
+          #!/bin/sh /etc/rc.common
+          START=96
+          STOP=15
 
-      - name: 9. 应用编译优化配置
+          detect_wifi_chip() {
+              local chip="unknown"
+              if command -v lspci >/dev/null 2>&1; then
+                  local pci_info=$(lspci | grep -iE "mediatek|mt7916|rtl8822" | head -n1)
+                  [ "$pci_info" != "" ] && chip=$(echo "$pci_info" | grep -oE "MT7916|MT7921|RTL8822" | head -n1)
+              fi
+              if [ "$chip" = "unknown" ]; then
+                  local modalias=$(find /sys/class/net -name "wlan*" -exec cat "{}/device/modalias" \; 2>/dev/null | head -n1)
+                  [ "$modalias" != "" ] && chip=$(echo "$modalias" | grep -oE "mt7916|mt7921|rtl8822" | tr 'a-z' 'A-Z' | head -n1)
+              fi
+              echo "检测到 WiFi 芯片：$chip"
+              echo "$chip"
+          }
+
+          get_wifi_device() {
+              local dev=""
+              local idx=0
+              while true; do
+                  local exists=$(uci get wireless.@wifi-device[$idx].type 2>/dev/null)
+                  [ $? -ne 0 ] && break
+                  local disabled=$(uci get wireless.@wifi-device[$idx].disabled 2>/dev/null)
+                  if [ "$disabled" = "0" ] || [ "$disabled" = "no" ]; then
+                      dev="@wifi-device[$idx]"
+                      break
+                  fi
+                  idx=$((idx + 1))
+              done
+              [ -z "$dev" ] && dev="@wifi-device[0]" && uci set "$dev.disabled=0"
+              echo "可用 WiFi 设备：$dev"
+              echo "$dev"
+          }
+
+          start() {
+              echo "=== 配置 WiFi 热点 ==="
+              local uci="/sbin/uci"
+              local wifi="/sbin/wifi"
+              [ ! -x "$uci" ] || [ ! -x "$wifi" ] && echo "错误：缺少工具！" && return 1
+
+              local chip=$(detect_wifi_chip)
+              case "$chip" in
+                  "MT7916") modprobe mt7916 2>/dev/null ;;
+                  "MT7921") modprobe mt7921e 2>/dev/null ;;
+                  "RTL8822") modprobe rtl8822ce 2>/dev/null ;;
+              esac
+
+              local dev=$(get_wifi_device)
+              local iface="${dev//wifi-device/wifi-iface}"
+              uci set "$iface.mode=ap"
+              uci set "$iface.ssid=${HOTSPOT_SSID}"
+              uci set "$iface.encryption=psk2"
+              uci set "$iface.key=${HOTSPOT_PASSWORD}"
+              uci set "$iface.network=lan"
+
+              uci commit wireless
+              $wifi up && echo "=== 热点启动成功 ===" || echo "错误：启动失败！"
+          }
+
+          stop() {
+              echo "=== 关闭热点 ==="
+              /sbin/wifi down
+              uci set "$(get_wifi_device).disabled=1"
+              uci commit wireless
+          }
+          EOF
+
+          chmod +x istoreos-src/package/base-files/files/etc/init.d/wifi-hotspot-auto
+          cd istoreos-src
+          echo 'ln -sf /etc/init.d/wifi-hotspot-auto /etc/rc.d/S96wifi-hotspot-auto' >> package/base-files/files/etc/rc.local
+
+      ###########################################################################
+      # 步骤7：添加 WAN-LAN 转发脚本
+      ###########################################################################
+      - name: 7. 添加 WAN-LAN 转发与 NAT 脚本
         run: |
-          cd istoreos
-          echo "CONFIG_CCACHE=y" >> .config
-          echo "CONFIG_BUILD_LOG=y" >> .config
-          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=8192" >> .config
-          echo "CONFIG_TARGET_ROOTFS_EXT4FS=y" >> .config
-          echo "CONFIG_TARGET_ROOTFS_EXT4FS_LABEL=\"rootfs\"" >> .config
-          echo "✅ 编译优化配置应用完成"
+          cat > istoreos-src/package/base-files/files/etc/init.d/wan-lan-forward << 'EOF'
+          #!/bin/sh /etc/rc.common
+          START=97
+          STOP=20
 
-      - name: 10. 配置下载加速
+          check_wan_if() {
+              local wan_if="${WAN_INTERFACE}"
+              local retry=0
+              while [ $retry -lt 10 ]; do
+                  if ip link show "$wan_if" >/dev/null 2>&1; then
+                      echo "$wan_if"
+                      return 0
+                  fi
+                  echo "等待 WAN 接口（$retry/10）..."
+                  sleep 3
+                  retry=$((retry + 1))
+              done
+              wan_if=$(ip link show | grep -o "wwan[0-9]" | head -n1)
+              [ -z "$wan_if" ] && echo "错误：未找到 WAN 接口！" && return 1
+              echo "$wan_if"
+          }
+
+          config_firewall() {
+              local wan_if="$1"
+              local uci="/sbin/uci"
+              local firewall="/etc/init.d/firewall"
+              [ ! -x "$uci" ] || [ ! -x "$firewall" ] && return 1
+
+              local wan_zone_idx=$($uci show firewall | grep -n "zone\[\].name='$WAN_ZONE'" | cut -d: -f1 | sed 's/[^0-9]//g')
+              if [ -z "$wan_zone_idx" ]; then
+                  $uci add firewall zone
+                  wan_zone_idx=$($uci show firewall | grep -c "zone\[\]" -1 | tail -n1 | sed 's/[^0-9]//g')
+                  $uci set firewall.@zone[$wan_zone_idx].name="$WAN_ZONE"
+                  $uci set firewall.@zone[$wan_zone_idx].input='REJECT'
+                  $uci set firewall.@zone[$wan_zone_idx].output='ACCEPT'
+                  $uci set firewall.@zone[$wan_zone_idx].forward='REJECT'
+                  $uci set firewall.@zone[$wan_zone_idx].masq='1'
+                  $uci set firewall.@zone[$wan_zone_idx].mtu_fix='1'
+              fi
+              $uci add_list firewall.@zone[$wan_zone_idx].network="$wan_if"
+
+              $uci add firewall forwarding
+              local forward_idx=$($uci show firewall | grep -c "forwarding\[\]" -1 | tail -n1 | sed 's/[^0-9]//g')
+              $uci set firewall.@forwarding[$forward_idx].src="$WAN_ZONE"
+              $uci set firewall.@forwarding[$forward_idx].dest="$LAN_ZONE"
+
+              $uci set firewall.@zone[$wan_zone_idx].masq_src='!192.168.1.0/24'
+              $uci set firewall.@zone[$wan_zone_idx].masq_dest='!192.168.1.0/24'
+
+              $uci commit firewall
+              $firewall restart
+              echo "WAN-LAN 转发配置完成！"
+          }
+
+          start() {
+              echo "=== 启动 WAN-LAN 转发 ==="
+              local wan_if=$(check_wan_if)
+              [ -z "$wan_if" ] && return 1
+              config_firewall "$wan_if"
+          }
+
+          stop() {
+              echo "=== 关闭 WAN-LAN 转发 ==="
+              local wan_if=$(check_wan_if)
+              if [ ! -z "$wan_if" ]; then
+                  local wan_zone_idx=$($uci show firewall | grep -n "zone\[\].name='$WAN_ZONE'" | cut -d: -f1 | sed 's/[^0-9]//g')
+                  $uci delete firewall.@zone[$wan_zone_idx].network."$wan_if" 2>/dev/null
+                  $uci commit firewall
+                  /etc/init.d/firewall restart
+              fi
+          }
+          EOF
+
+          chmod +x istoreos-src/package/base-files/files/etc/init.d/wan-lan-forward
+          cd istoreos-src
+          echo 'ln -sf /etc/init.d/wan-lan-forward /etc/rc.d/S97wan-lan-forward' >> package/base-files/files/etc/rc.local
+
+      ###########################################################################
+      # 步骤8：编译固件
+      ###########################################################################
+      - name: 8. 编译 iStoreOS 固件
         run: |
-          cd istoreos
-          if ! grep -q "WGET_CMD.*axel" include/download.mk; then
-            sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 16 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' include/download.mk
-          fi
-          echo "DOWNLOAD_TIMEOUT=1800" >> include/download.mk
-          echo "✅ 下载加速配置完成"
+          cd istoreos-src
+          echo "CPU 核心数：$(nproc)"
+          make -j$(nproc) V=s  # 内存不足可改为 -j4
 
-      - name: 11. 集成5G自动启动和WiFi配置
-        run: |
-          cd istoreos
-          mkdir -p files/etc/init.d files/etc/config
-          
-          # 创建5G自动启动脚本（仅启动5G模块，不包含WiFi设置）
-          cat > files/etc/init.d/5g-auto << 'EOF'
-#!/bin/sh /etc/rc.common
-START=99
-STOP=10
-start() {
-    echo "🚀 启动5G自动启动服务"
-    # 5G模块启动命令
-    if [ -e /dev/cdc-wdm0 ]; then
-        mbimcli -d /dev/cdc-wdm0 --set-operating-mode=online
-        sleep 5
-        echo "5G模块已启动"
-    else
-        echo "❌ 5G模块设备不存在，无法启动"
-    fi
-}
-stop() {
-    echo "🛑 停止5G自动启动服务"
-    if [ -e /dev/cdc-wdm0 ]; then
-        mbimcli -d /dev/cdc-wdm0 --set-operating-mode=offline
-        echo "5G模块已停止"
-    fi
-}
-EOF
-          chmod +x files/etc/init.d/5g-auto
-          
-          # 创建WiFi配置（直接使用用户输入的SSID和密码）
-          cat > files/etc/config/wireless << "ENDOFFILE"
-config wifi-device 'radio0'
-    option type 'mac80211'
-    option path 'platform/soc/fe300000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0'
-    option channel '11'
-    option band '2g'
-    option htmode 'HT20'
-    option country 'CN'
-    option disabled '0'
+          echo -e "\n编译产物："
+          ls -lh bin/targets/${TARGET_DEVICE}/${TARGET_PROFILE}/*.img.gz
 
-config wifi-iface 'default_radio0'
-    option device 'radio0'
-    option network 'lan'
-    option mode 'ap'
-    option ssid '${WIFI_2G_SSID}'
-    option encryption 'psk2'
-    option key '${WIFI_2G_PASS}'
-
-config wifi-device 'radio1'
-    option type 'mac80211'
-    option path 'platform/soc/fe300000.pcie/pci0000:00/0000:00:01.0/0000:02:00.0'
-    option channel '36'
-    option band '5g'
-    option htmode 'HE80'
-    option country 'CN'
-    option disabled '0'
-
-config wifi-iface 'default_radio1'
-    option device 'radio1'
-    option network 'lan'
-    option mode 'ap'
-    option ssid '${WIFI_5G_SSID}'
-    option encryption 'psk2'
-    option key '${WIFI_5G_PASS}'
-ENDOFFILE
-          
-          # 替换占位符
-          sed -i "s/\${WIFI_2G_SSID}/${{ github.event.inputs.wifi_2g_ssid }}/" files/etc/config/wireless
-          sed -i "s/\${WIFI_5G_SSID}/${{ github.event.inputs.wifi_5g_ssid }}/" files/etc/config/wireless
-          sed -i "s/\${WIFI_2G_PASS}/${{ github.event.inputs.wifi_2g_pass }}/" files/etc/config/wireless
-          sed -i "s/\${WIFI_5G_PASS}/${{ github.event.inputs.wifi_5g_pass }}/" files/etc/config/wireless
-          
-          echo "✅ 5G自动启动和WiFi配置集成完成"
-
-      - name: 12. 预下载资源文件
-        run: |
-          cd istoreos
-          export FORCE_UNSAFE_CONFIGURE=1
-          echo "📥 开始预下载资源文件..."
-          make download -j$(nproc) 2>&1 | tee ${{ env.LOG_DIR }}/download.log || make download -j2 2>&1 | tee -a ${{ env.LOG_DIR }}/download.log
-          echo "✅ 资源文件下载完成"
-
-      - name: 13. 配置编译环境
-        run: |
-          cd istoreos
-          export FORCE_UNSAFE_CONFIGURE=1
-          export CCACHE_DIR=${{ env.CCACHE_DIR }}
-          ccache -z
-          
-          CPU_CORES=$(nproc)
-          MEMORY_GB=$(free -g | awk 'NR==2{print $2}')
-          if [ $MEMORY_GB -ge 16 ]; then
-            JOB_COUNT=$((CPU_CORES + 2))
-          elif [ $MEMORY_GB -ge 8 ]; then
-            JOB_COUNT=$CPU_CORES
-          else
-            JOB_COUNT=$((CPU_CORES / 2))
-          fi
-          echo "JOB_COUNT=$JOB_COUNT" >> $GITHUB_ENV
-          echo "使用 $JOB_COUNT 个线程编译iStoreOS（CPU: $CPU_CORES, 内存: ${MEMORY_GB}GB）"
-
-      - name: 14. 编译iStoreOS固件
-        run: |
-          cd istoreos
-          export FORCE_UNSAFE_CONFIGURE=1
-          export CCACHE_DIR=${{ env.CCACHE_DIR }}
-          
-          echo "🏗️ 开始编译iStoreOS固件..."
-          make defconfig 2>&1 | tee ${{ env.LOG_DIR }}/defconfig.log
-          make -j$JOB_COUNT V=sc 2>&1 | tee ${{ env.LOG_DIR }}/compile.log
-          
-          if [ ! -d "${{ env.FIRMWARE_DIR }}" ] || ! ls "${{ env.FIRMWARE_DIR }}"/*.img* >/dev/null 2>&1; then
-            echo "❌ iStoreOS固件生成失败，尝试单线程编译..."
-            make -j1 V=s 2>&1 | tee -a ${{ env.LOG_DIR }}/compile.log
-            if [ ! -d "${{ env.FIRMWARE_DIR }}" ]; then
-              echo "❌ 编译彻底失败，请检查日志"
-              exit 1
-            fi
-          fi
-
-      - name: 15. 显示编译统计
-        run: |
-          cd istoreos
-          ccache -s 2>&1 | tee ${{ env.LOG_DIR }}/ccache.log
-          echo "iStoreOS编译完成"
-
-      - name: 16. 验证iStoreOS输出文件
-        run: |
-          cd istoreos
-          echo "📁 iStoreOS固件输出目录:" 2>&1 | tee ${{ env.LOG_DIR }}/verify.log
-          if [ -d "${{ env.FIRMWARE_DIR }}" ]; then
-            ls -la "${{ env.FIRMWARE_DIR }}/" 2>&1 | tee -a ${{ env.LOG_DIR }}/verify.log
-            echo "✅ iStoreOS固件生成成功" 2>&1 | tee -a ${{ env.LOG_DIR }}/verify.log
-          else
-            echo "❌ iStoreOS固件目录不存在" 2>&1 | tee -a ${{ env.LOG_DIR }}/verify.log
-            find ./bin -name "*.img*" -type f | head -10 2>&1 | tee -a ${{ env.LOG_DIR }}/verify.log
-            exit 1
-          fi
-
-      - name: 17. 整理iStoreOS产物
-        run: |
-          mkdir -p istoreos-firmware
-          
-          if [ -d "istoreos/${{ env.FIRMWARE_DIR }}" ]; then
-            cp "istoreos/${{ env.FIRMWARE_DIR }}"/*.img* istoreos-firmware/ 2>/dev/null || true
-            cp "istoreos/${{ env.FIRMWARE_DIR }}"/*.manifest istoreos-firmware/ 2>/dev/null || true
-          else
-            find ./istoreos/bin -name "*.img*" -exec cp {} istoreos-firmware/ \; 2>/dev/null || true
-          fi
-          
-          cd istoreos-firmware
-          for file in *.img*; do
-            [ -e "$file" ] && md5sum "$file" >> MD5校验值.txt
-          done
-          
-          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
-          cat > 固件信息.txt << "EOF"
-======================================
-           iStoreOS固件信息            
-======================================
-设备：RK3568 (XGP)
-编译时间：$(date +"%Y-%m-%d %H:%M:%S")
-Git提交：$SHORT_SHA
-版本：iStoreOS + 5G自动启动
-特性：刷机后自动启动5G和WiFi
-2.4G WiFi：${{ github.event.inputs.wifi_2g_ssid }}
-5G WiFi：${{ github.event.inputs.wifi_5g_ssid }}
-5G APN：${{ github.event.inputs.apn_5g }}
-启用网口转发：${{ github.event.inputs.enable_port_forwarding }}
-======================================
-EOF
-          if [ -f "MD5校验值.txt" ]; then
-            cat MD5校验值.txt >> 固件信息.txt
-          fi
-
-      - name: 18. 上传iStoreOS固件产物
+      ###########################################################################
+      # 步骤9：上传固件产物
+      ###########################################################################
+      - name: 9. 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: "iStoreOS-RK3568-5G自动版-${{ github.run_number }}-$(echo ${{ github.sha }} | cut -c1-8)"
-          path: istoreos-firmware/
+          name: istoreos-firmware-${{ env.TARGET_DEVICE }}-${{ env.TARGET_PROFILE }}
+          path: istoreos-src/bin/targets/${{ env.TARGET_DEVICE }}/${{ env.TARGET_PROFILE }}/*.img.gz
           retention-days: 30
-          if-no-files-found: error
-
-      - name: 19. 确保日志目录存在并上传
-        if: always()
-        run: |
-          mkdir -p ${{ env.LOG_DIR }}
-          echo "确保日志目录存在完成" > ${{ env.LOG_DIR }}/ensure.log
-          echo "日志目录内容:"
-          ls -la ${{ env.LOG_DIR }} || echo "日志目录为空"
-
-      - name: 20. 上传编译日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: "iStoreOS编译日志-${{ github.run_number }}"
-          path: ${{ env.LOG_DIR }}/
-          retention-days: 15
-          if-no-files-found: warn
