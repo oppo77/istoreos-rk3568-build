@@ -41,7 +41,7 @@ jobs:
     timeout-minutes: 180
     steps:
       ###########################################################################
-      # 前置缓存：提速+减少依赖安装时间
+      # 前置缓存：修复语法错误（github.sha[:8] → github.sha | slice: 0, 8）
       ###########################################################################
       - name: 0. 初始化缓存
         uses: actions/cache@v4
@@ -49,7 +49,7 @@ jobs:
           path: |
             ${{ env.CCACHE_DIR }}
             /var/cache/apt/archives
-          key: ${{ runner.os }}-build-cache-${{ github.sha[:8] }}
+          key: ${{ runner.os }}-build-cache-${{ github.sha | slice: 0, 8 }}  # 修复语法
           restore-keys: |
             ${{ runner.os }}-build-cache-
 
@@ -252,12 +252,12 @@ jobs:
           echo "=== ✅ 产物整理完成 ==="
 
       ###########################################################################
-      # 产物上传：成功传固件，失败传日志
+      # 产物上传：修复语法错误（github.sha[:8] → github.sha | slice: 0, 8）
       ###########################################################################
       - name: 10. 上传固件产物
         uses: actions/upload-artifact@v4
         with:
-          name: iStoreOS-RK3568-固件-${{ github.run_number }}
+          name: iStoreOS-RK3568-固件-${{ github.run_number }}-${{ github.sha | slice: 0, 8 }}  # 修复语法
           path: final-firmware/
           retention-days: 30
           if-no-files-found: error
