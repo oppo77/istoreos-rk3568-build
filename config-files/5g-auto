@@ -1,160 +1,274 @@
 #!/bin/bash
 LOG_TAG="5G-AUTO"
 
-# 1. 全自动识别5G模块串口（FM350gl通常为ttyUSB0~ttyUSB3）
+# 1. 全自动识别5G模块串口（修复版）
 find_5g_serial() {
     logger -t $LOG_TAG "开始识别5G模块串口..."
+    
+    # 等待USB设备识别
+    sleep 5
     SERIAL_PORTS=$(ls /dev/ttyUSB* 2>/dev/null)
+    
     if [ -z "$SERIAL_PORTS" ]; then
         logger -t $LOG_TAG "错误：未找到USB串口设备！"
         return 1
     fi
-    # 验证串口是否为5G模块（发送AT+CGMI匹配广和通）
+    
+    # 验证串口是否为5G模块
     for PORT in $SERIAL_PORTS; do
         logger -t $LOG_TAG "验证串口：$PORT"
-        AT_RESP=$(screen -L -Logfile /tmp/at_log -d -m -S at_test $PORT 115200 \
-            && sleep 1 && echo -e "AT+CGMI\r" > /dev/$PORT && sleep 2 \
-            && cat /tmp/at_log | grep "Quectel\|Simcom\|Ublox\|ZTE\|Fibocom" 2>/dev/null)
+        
+        # 使用microcom或cat进行AT命令测试
+        if command -v microcom >/dev/null 2>&1; then
+            AT_RESP=$(echo -e "AT+CGMI\r" | timeout 3 microcom -t 3000 $PORT 2>/dev/null | grep -i "quectel\|simcom\|fibocom\|meig\|yuge")
+        else
+            # 备用方法
+            stty -F $PORT 115200 >/dev/null 2>&1
+            echo -e "AT+CGMI\r" > $PORT
+            sleep 1
+            AT_RESP=$(timeout 3 cat $PORT 2>/dev/null | grep -i "quectel\|simcom\|fibocom\|meig\|yuge")
+        fi
+        
         if [ -n "$AT_RESP" ]; then
-            logger -t $LOG_TAG "成功识别串口：$PORT（厂商：$AT_RESP）"
+            logger -t $LOG_TAG "成功识别5G模块：$PORT（响应：$AT_RESP）"
             echo "$PORT"
-            rm -f /tmp/at_log
             return 0
         fi
-        rm -f /tmp/at_log
     done
-    logger -t $LOG_TAG "错误：未找到有效5G串口！"
+    
+    logger -t $LOG_TAG "错误：未找到有效5G模块串口！"
     return 1
 }
 
-# 2. 自动识别运营商并匹配APN（FM350gl支持ModemManager）
+# 2. 自动识别运营商并匹配APN（修复版）
 get_auto_apn() {
     logger -t $LOG_TAG "识别运营商..."
-    # 等待ModemManager加载（FM350gl初始化需5秒）
-    for ((i=0; i<10; i++)); do
-        MODEM_PATH=$(mmcli -L | grep "modem" | awk '{print $1}' 2>/dev/null)
-        if [ -n "$MODEM_PATH" ]; then break; fi
-        sleep 1
+    
+    # 等待ModemManager初始化
+    for i in $(seq 1 15); do
+        if mmcli -L 2>/dev/null | grep -q "modem"; then
+            break
+        fi
+        sleep 2
     done
+    
+    MODEM_PATH=$(mmcli -L 2>/dev/null | grep -o "/org/freedesktop/ModemManager1/Modem/[0-9]*" | head -1)
     if [ -z "$MODEM_PATH" ]; then
-        logger -t $LOG_TAG "错误：ModemManager未识别FM350gl！"
-        return 1
+        logger -t $LOG_TAG "警告：ModemManager未识别到模块，使用默认APN"
+        echo "cmnet"
+        return 0
     fi
-    # 获取IMSI（判断运营商）
-    IMSI=$(mmcli -m $MODEM_PATH --command="AT+CIMI" | grep -oE "[0-9]{15,17}" 2>/dev/null)
-    if [ -z "$IMSI" ]; then
-        logger -t $LOG_TAG "错误：无法获取SIM卡IMSI！"
-        return 1
+    
+    # 获取运营商信息
+    OPERATOR=$(mmcli -m $MODEM_PATH 2>/dev/null | grep "operator name" | cut -d: -f2 | tr -d ' ')
+    if [ -n "$OPERATOR" ]; then
+        logger -t $LOG_TAG "识别运营商：$OPERATOR"
+        case "$OPERATOR" in
+            *"China Mobile"*|*"中国移动"*) echo "cmnet";;
+            *"China Unicom"*|*"中国联通"*) echo "3gnet";;
+            *"China Telecom"*|*"中国电信"*) echo "ctnet";;
+            *) echo "cmnet";;
+        esac
+        return 0
     fi
-    # 匹配运营商（移动46000/联通46001/电信46003）
-    MCC=${IMSI:0:3}
-    MNC=${IMSI:3:2}
-    case "$MCC$MNC" in
-        46000|46002|46007) echo "cmnet"; logger -t $LOG_TAG "识别为中国移动";;
-        46001|46006) echo "3gnet"; logger -t $LOG_TAG "识别为中国联通";;
-        46003|46005|46011) echo "ctnet"; logger -t $LOG_TAG "识别为中国电信";;
-        *) echo "__5G_APN__"; logger -t $LOG_TAG "未知运营商，用默认APN";;
-    esac
+    
+    # 备用方案：通过IMSI识别
+    IMSI=$(mmcli -m $MODEM_PATH --command='AT+CIMI' 2>/dev/null | tail -1 | grep -oE "[0-9]{15}")
+    if [ -n "$IMSI" ]; then
+        MNC=${IMSI:3:2}
+        case "$MNC" in
+            "00"|"02"|"07") echo "cmnet"; logger -t $LOG_TAG "IMSI识别为中国移动";;
+            "01"|"06") echo "3gnet"; logger -t $LOG_TAG "IMSI识别为中国联通";;
+            "03"|"05"|"11") echo "ctnet"; logger -t $LOG_TAG "IMSI识别为中国电信";;
+            *) echo "cmnet"; logger -t $LOG_TAG "未知运营商，使用默认APN";;
+        esac
+    else
+        echo "cmnet"
+        logger -t $LOG_TAG "无法识别运营商，使用默认APN"
+    fi
+    
     return 0
 }
 
-# 3. 5G拨号（QMI协议，适配FM350gl）
+# 3. 5G拨号（多方式尝试）
 start_5g_modem() {
-    local SERIAL_PORT=$1
-    local AUTO_APN=$2
-    logger -t $LOG_TAG "5G拨号（串口：$SERIAL_PORT，APN：$AUTO_APN）..."
+    local AUTO_APN=$1
+    logger -t $LOG_TAG "5G拨号（APN：$AUTO_APN）..."
+    
     # 停止现有连接
     ifconfig wwan0 down 2>/dev/null
-    pppd kill 2>/dev/null
-    # QMI拨号（FM350gl优先用此方式）
-    qmicli -d /dev/cdc-wdm0 --device-open-net="net-raw-ip|net-no-qos-header" --wds-start-network="$AUTO_APN" --client-no-release-cid
-    if [ $? -ne 0 ]; then
-        logger -t $LOG_TAG "QMI拨号失败，尝试PPPD..."
-        # 备用PPPD拨号
-        cat > /tmp/ppp_options << EOF
-/dev/$SERIAL_PORT
+    pkill -f pppd 2>/dev/null
+    
+    # 方式1: 使用ModemManager QMI拨号
+    if mmcli -L 2>/dev/null | grep -q "modem"; then
+        MODEM_PATH=$(mmcli -L | grep -o "/org/freedesktop/ModemManager1/Modem/[0-9]*" | head -1)
+        logger -t $LOG_TAG "使用ModemManager QMI拨号..."
+        mmcli -m $MODEM_PATH --simple-connect="apn=$AUTO_APN,ip-type=4" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            sleep 5
+        fi
+    fi
+    
+    # 方式2: 直接QMI拨号
+    if [ -e "/dev/cdc-wdm0" ]; then
+        logger -t $LOG_TAG "尝试直接QMI拨号..."
+        uqmi -d /dev/cdc-wdm0 --stop-network 0xffffffff --autoconnect >/dev/null 2>&1
+        uqmi -d /dev/cdc-wdm0 --set-data-format 802.3 >/dev/null 2>&1
+        uqmi -d /dev/cdc-wdm0 --network-register >/dev/null 2>&1
+        
+        # 启动连接
+        NETWORK_HANDLE=$(uqmi -d /dev/cdc-wdm0 --start-network "$AUTO_APN" --autoconnect)
+        if [ $? -eq 0 ]; then
+            # 获取IP
+            if udhcpc -i wwan0 -q -f -n >/dev/null 2>&1; then
+                WWAN_IP=$(ip addr show wwan0 2>/dev/null | grep "inet " | awk '{print $2}')
+                if [ -n "$WWAN_IP" ]; then
+                    logger -t $LOG_TAG "QMI拨号成功！IP: $WWAN_IP"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+    
+    # 方式3: PPP拨号（备用）
+    SERIAL_PORT=$(find_5g_serial)
+    if [ -n "$SERIAL_PORT" ]; then
+        logger -t $LOG_TAG "尝试PPP拨号..."
+        cat > /tmp/ppp-options << EOF
+$SERIAL_PORT
 115200
-crtscts
+nocrtscts
 modem
 defaultroute
 noipdefault
 usepeerdns
-apn $AUTO_APN
+noauth
+persist
+maxfail 0
+holdoff 10
+ipcp-accept-local
+ipcp-accept-remote
+lcp-echo-failure 3
+lcp-echo-interval 60
+connect '/usr/sbin/chat -v -f /etc/chatscripts/3g.chat'
 EOF
-        pppd file /tmp/ppp_options &
-        sleep 5
+        # 创建chat脚本
+        cat > /etc/chatscripts/3g.chat << EOF
+ABORT 'BUSY'
+ABORT 'ERROR'
+ABORT 'NO ANSWER'
+TIMEOUT 30
+'' 'AT'
+OK 'AT+CGDCONT=1,"IP","$AUTO_APN"'
+OK 'ATD*99#'
+CONNECT ''
+EOF
+        pppd file /tmp/ppp-options >/dev/null 2>&1 &
+        PPP_PID=$!
+        
+        # 等待PPP连接
+        for i in $(seq 1 20); do
+            if ip route show default | grep -q ppp; then
+                WWAN_IP=$(ip addr show ppp0 2>/dev/null | grep "inet " | awk '{print $2}')
+                logger -t $LOG_TAG "PPP拨号成功！IP: $WWAN_IP"
+                return 0
+            fi
+            sleep 2
+        done
+        kill $PPP_PID 2>/dev/null
     fi
-    # 验证拨号成功
-    for ((i=0; i<10; i++)); do
-        WWAN_IP=$(ip addr show wwan0 | grep "inet " | awk '{print $2}' 2>/dev/null)
-        if [ -n "$WWAN_IP" ]; then
-            logger -t $LOG_TAG "5G拨号成功！wwan0 IP：$WWAN_IP"
-            rm -f /tmp/ppp_options
-            return 0
-        fi
-        sleep 2
-    done
-    logger -t $LOG_TAG "错误：5G拨号失败！"
+    
+    logger -t $LOG_TAG "错误：所有拨号方式均失败！"
     return 1
 }
 
-# 4. 网口转发配置（5G→LAN，适配2个千兆网口）
+# 4. 网络转发配置（优化版）
 config_net_forward() {
-    logger -t $LOG_TAG "配置网口转发..."
+    logger -t $LOG_TAG "配置网络转发..."
+    
     # 启用IP转发
     echo 1 > /proc/sys/net/ipv4/ip_forward
-    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-    sysctl -p 2>/dev/null
-    # 识别LAN口（xgp通常为eth0/eth1，取非DOWN的接口）
-    LAN_PORT=$(ip link show | grep -E "eth[0-9]" | grep -v "DOWN" | head -1 | awk '{print $2}' | sed 's/://' 2>/dev/null)
-    LAN_PORT=${LAN_PORT:-"eth0"}  #  fallback
-    logger -t $LOG_TAG "识别LAN口：$LAN_PORT"
-    # OpenWRT防火墙转发（WAN→LAN）
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+    
+    # 配置OpenWrt防火墙
+    uci set network.wan.proto='dhcp'
+    uci set network.wan.ifname='wwan0'
+    uci commit network
+    
+    # 防火墙规则
+    uci set firewall.@zone[1].input='ACCEPT'
+    uci set firewall.@zone[1].output='ACCEPT'
     uci set firewall.@zone[1].forward='ACCEPT'
-    uci set firewall.@forwarding[0]='forwarding'
-    uci set firewall.@forwarding[0].src='wan'
-    uci set firewall.@forwarding[0].dest='lan'
+    uci set firewall.@zone[1].masq='1'
     uci commit firewall
+    
+    # 重启服务
+    /etc/init.d/network reload
     /etc/init.d/firewall restart
-    # iptables NAT转发（确保LAN设备上网）
+    
+    # iptables规则（确保NAT）
+    iptables -t nat -F POSTROUTING
     iptables -t nat -A POSTROUTING -o wwan0 -j MASQUERADE
-    iptables -A FORWARD -i $LAN_PORT -o wwan0 -j ACCEPT
-    iptables -A FORWARD -i wwan0 -o $LAN_PORT -m state --state RELATED,ESTABLISHED -j ACCEPT
-    logger -t $LOG_TAG "网口转发配置完成"
+    iptables -A FORWARD -i br-lan -o wwan0 -j ACCEPT
+    iptables -A FORWARD -i wwan0 -o br-lan -m state --state RELATED,ESTABLISHED -j ACCEPT
+    
+    logger -t $LOG_TAG "网络转发配置完成"
     return 0
 }
 
-# 5. 自动启用WiFi（MT7916的2.4G/5G）
+# 5. 启用WiFi（优化版）
 auto_enable_wifi() {
     logger -t $LOG_TAG "启用WiFi..."
-    # 验证WiFi硬件（radio0=2.4G，radio1=5G）
-    RADIOS=$(iw list | grep "phy#" | wc -l)
-    if [ $RADIOS -eq 0 ]; then
-        logger -t $LOG_TAG "未检测到WiFi硬件！"
-        return 0
+    
+    # 检查WiFi硬件
+    if ! iw list >/dev/null 2>&1; then
+        logger -t $LOG_TAG "未检测到WiFi硬件"
+        return 1
     fi
-    # 重启WiFi服务（应用SSID/密码配置）
+    
+    # 启用WiFi
+    uci set wireless.@wifi-device[0].disabled='0'
+    uci set wireless.@wifi-device[1].disabled='0'
     uci commit wireless
-    /etc/init.d/wpad restart
-    sleep 3
+    
+    # 重启WiFi服务
+    wifi reload
+    
     # 验证WiFi状态
-    WIFI_SSIDS=$(iw dev | grep "ssid" | awk '{print $2}')
-    if [ -n "$WIFI_SSIDS" ]; then
-        logger -t $LOG_TAG "WiFi已启用，SSID：$WIFI_SSIDS"
+    sleep 5
+    if iw dev | grep -q "ssid"; then
+        logger -t $LOG_TAG "WiFi启用成功"
     else
-        logger -t $LOG_TAG "警告：WiFi未检测到SSID！"
+        logger -t $LOG_TAG "WiFi启用警告：未检测到SSID广播"
     fi
+    
     return 0
 }
 
-# 主流程（失败后重试1次）
+# 主流程
 main() {
     logger -t $LOG_TAG "===== 智能5G启动脚本开始 ====="
-    SERIAL_PORT=$(find_5g_serial) || exit 1
-    AUTO_APN=$(get_auto_apn) || exit 1
-    start_5g_modem "$SERIAL_PORT" "$AUTO_APN" || exit 1
-    config_net_forward
-    auto_enable_wifi
-    logger -t $LOG_TAG "===== 智能脚本执行完成 ====="
+    
+    # 等待系统初始化
+    sleep 10
+    
+    # 识别APN
+    AUTO_APN=$(get_auto_apn)
+    logger -t $LOG_TAG "使用APN: $AUTO_APN"
+    
+    # 拨号
+    if start_5g_modem "$AUTO_APN"; then
+        config_net_forward
+        auto_enable_wifi
+        logger -t $LOG_TAG "===== 5G网络启动完成 ====="
+        return 0
+    else
+        logger -t $LOG_TAG "===== 5G启动失败 ====="
+        return 1
+    fi
 }
-main || (logger -t $LOG_TAG "首次失败，30秒后重试..." && sleep 30 && main)
+
+# 启动服务（带重试）
+logger -t $LOG_TAG "等待系统就绪..."
+sleep 15
+main || (logger -t $LOG_TAG "首次启动失败，30秒后重试..." && sleep 30 && main)
