@@ -45,9 +45,9 @@ jobs:
           path: |
             ${{ env.CCACHE_DIR }}
             /var/cache/apt/archives
-          key: "${{ runner.os }}-build-cache-${{ github.sha.substr(0,8) }}"  # 改用substr，无|符号
+          key: "${{ runner.os }}-build-cache-${{ github.sha }}"
           restore-keys: |
-            "${{ runner.os }}-build-cache-"
+            ${{ runner.os }}-build-cache-
 
       - name: 1. 拉取仓库代码
         uses: actions/checkout@v4
@@ -71,10 +71,10 @@ jobs:
       - name: 3. 安装编译依赖（修复libtool）
         run: |
           sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
-          sudo echo "deb http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
+          echo "deb http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
           deb http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
           deb http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
-          deb http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse" > /etc/apt/sources.list
+          deb http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse" | sudo tee /etc/apt/sources.list
           
           sudo apt-get clean
           sudo apt-get update -y --fix-missing
@@ -167,7 +167,15 @@ jobs:
           ccache -C
           mkdir -p ${{ env.LOG_DIR }}
 
-      - name: 8. 编译固件（单线程+日志）
+      - name: 8. 设置编译环境
+        run: |
+          cd openwrt
+          export FORCE_UNSAFE_CONFIGURE=1
+          export CCACHE_DIR=${{ env.CCACHE_DIR }}
+          ccache -M 2G
+          ccache -s
+
+      - name: 9. 编译固件（单线程+日志）
         run: |
           cd openwrt
           TOOL_PATH=$(find ./staging_dir -name "ipkg-make-index" -type f | head -1)
@@ -180,40 +188,49 @@ jobs:
             exit 1
           fi
 
-      - name: 9. 整理产物（MD5+清单）
+      - name: 10. 验证输出路径
+        run: |
+          cd openwrt
+          echo "固件文件列表："
+          find ./bin -name "*.img*" -type f | head -10
+          ls -la "${{ env.FIRMWARE_DIR }}" || echo "固件目录不存在"
+
+      - name: 11. 整理产物（MD5+清单）
         run: |
           mkdir -p final-firmware
-          cp "${{ env.FIRMWARE_DIR }}"/*.img.gz final-firmware/ || true
-          cp "${{ env.FIRMWARE_DIR }}"/*.img final-firmware/ || true
+          cp "${{ env.FIRMWARE_DIR }}"/*.img.gz final-firmware/ 2>/dev/null || true
+          cp "${{ env.FIRMWARE_DIR }}"/*.img final-firmware/ 2>/dev/null || true
           
           cd final-firmware
           for file in *.img*; do
-            md5sum "$file" >> MD5校验值.txt
+            [ -e "$file" ] && md5sum "$file" >> MD5校验值.txt
           done
           
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
           echo "======================================" > 固件信息.txt
           echo "         iStoreOS固件信息（RK3568）     " >> 固件信息.txt
           echo "======================================" >> 固件信息.txt
           echo "编译时间：$(date +"%Y-%m-%d %H:%M:%S")" >> 固件信息.txt
+          echo "Git提交：$SHORT_SHA" >> 固件信息.txt
           echo "配置文件：${{ env.CONFIG_URL }}（原始配置）" >> 固件信息.txt
           echo "WiFi：2.4G=${{ github.event.inputs.wifi_2g_ssid }} / 5G=${{ github.event.inputs.wifi_5g_ssid }}" >> 固件信息.txt
           echo "5G APN：${{ github.event.inputs.apn_5g }}" >> 固件信息.txt
           echo "======================================" >> 固件信息.txt
           echo "MD5校验值：" >> 固件信息.txt
-          cat MD5校验值.txt >> 固件信息.txt
+          [ -f "MD5校验值.txt" ] && cat MD5校验值.txt >> 固件信息.txt
 
-      - name: 10. 上传固件产物
+      - name: 12. 上传固件产物
         uses: actions/upload-artifact@v4
         with:
-          name: "iStoreOS-RK3568-固件-${{ github.run_number }}-${{ github.sha.substr(0,8) }}"  # 改用substr，无|符号
+          name: "iStoreOS-RK3568-固件-${{ github.run_number }}-$(echo ${{ github.sha }} | cut -c1-8)"
           path: final-firmware/
           retention-days: 30
           if-no-files-found: error
 
-      - name: 11. 上传失败日志
+      - name: 13. 上传失败日志
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: "编译失败日志-${{ github.run_number }}"
-          path: ${{ env.LOG_DIR }}/compile.log
+          path: ${{ env.LOG_DIR }}/
           retention-days: 15
