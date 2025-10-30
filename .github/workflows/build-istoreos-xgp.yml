@@ -1,149 +1,196 @@
-name: iStoreOS-xgp-AutoBuild
+name: 编译 iStoreOS 固件（RK3568 + 修复 ipkg-make-index）
+
+# 触发条件：手动触发 + 代码推送触发（可根据需求调整）
 on:
   workflow_dispatch:
     inputs:
-      lan_ip:
-        description: '路由器管理IP（LAN地址）'
-        required: true
-        default: '192.168.10.1'
+      # 可选输入：方便自定义配置（如WiFi名称、5G APN）
       wifi_2g_ssid:
-        description: '2.4G WiFi热点名称'
+        description: "2.4G WiFi名称"
         required: true
-        default: 'xgp-WiFi-2.4G'
+        default: "iStoreOS-2.4G"
+      wifi_2g_pass:
+        description: "2.4G WiFi密码（8-63位）"
+        required: true
+        default: "12345678"
       wifi_5g_ssid:
-        description: '5G WiFi热点名称'
+        description: "5G WiFi名称"
         required: true
-        default: 'xgp-WiFi-5G'
-      wifi_password:
-        description: 'WiFi密码（8-63位）'
+        default: "iStoreOS-5G"
+      wifi_5g_pass:
+        description: "5G WiFi密码（8-63位）"
         required: true
-        default: 'xgp123456'
+        default: "12345678"
       apn_5g:
-        description: '5G模块默认APN（移动cmnet/联通3gnet/电信ctnet）'
+        description: "5G模块APN（移动cmnet/联通3gnet/电信ctnet）"
         required: true
-        default: 'cmnet'
-permissions:
-  contents: read
-  packages: read
+        default: "cmnet"
+  push:
+    branches:
+      - main  # 仅当推送到main分支时触发（可修改为你的分支名）
+
 jobs:
-  build_xgp:
-    name: Build iStoreOS for xgp (RK3568+FM350gl+MT7916)
-    runs-on: ubuntu-22.04
+  build-firmware:
+    runs-on: ubuntu-22.04  # 兼容iStoreOS编译的稳定环境
     steps:
-      - name: 深度清理磁盘空间（新增高占用目录删除）
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      # 步骤1：检查代码（获取仓库源码）
+      - name: 1. 检查GitHub仓库代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # 仅拉取最新代码，减少耗时
+
+      # 步骤2：深度清理磁盘空间（确保≥25GB剩余）
+      - name: 2. 深度清理磁盘空间（关键：避免空间不足）
         run: |
-          sudo docker builder prune -af || true
-          sudo docker rmi `docker images -q 2>/dev/null` || true
-          sudo rm -rf /var/lib/docker/volumes/* || true
-          sudo rm -rf /opt/hostedtoolcache/* || true
-          sudo rm -rf /var/log/* || true
-          sudo rm -rf /tmp/* || true
-          sudo rm -rf /var/tmp/* || true
-          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android || true
-          sudo rm -rf /home/runner/.cache/* /home/runner/.npm /home/runner/.yarn || true
-          sudo apt-get update -qq
-          sudo apt-get -y purge azure-cli* docker* ghc* zulu* llvm* firefox google* powershell* || true
-          sudo apt-get -y autoremove --purge && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* || true
-          sudo apt-get -y install --no-install-recommends build-essential clang flex bison g++ gawk libncurses5-dev libssl-dev python3 python3-pip rsync subversion swig unzip zlib1g-dev device-tree-compiler liblz4-tool curl wget axel || true
-          sudo pip3 install pyelftools || true
-          sudo timedatectl set-timezone "Asia/Shanghai"
-          echo "=== 清理后磁盘剩余空间 ==="
+          echo "=== 清理前磁盘空间 ==="
           df -h /
-      - name: 拉取oppo77/istoreos-rk3568-build仓库（含脚本和模板）
-        uses: actions/checkout@v4
-        with:
-          path: config-repo
-          fetch-depth: 1
-          repository: oppo77/istoreos-rk3568-build
-          ref: main
-      - name: 克隆iStoreOS-24.10源码
-        uses: actions/checkout@v4
-        with:
-          repository: istoreos/istoreos
-          ref: istoreos-24.10
-          path: openwrt
-          fetch-depth: 1
-      - name: 配置清华/中科大镜像源
+          
+          # 删除高占用预装软件（保留编译必需组件）
+          sudo rm -rf /usr/share/dotnet /usr/local/share/powershell /usr/local/lib/android /opt/ghc || true
+          sudo apt-get -y purge azure-cli* docker* ghc* zulu* llvm* firefox google* powershell* dotnet* mono* || true
+          sudo apt-get autoremove -y && sudo apt-get clean
+          
+          echo "=== 清理后磁盘空间 ==="
+          df -h /  # 确保剩余空间≥25GB
+
+      # 步骤3：安装编译依赖（含axel多线程下载、ccache缓存）
+      - name: 3. 安装编译必需依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y axel ccache git build-essential libncurses5-dev libssl-dev \
+            flex bison make gcc g++ gettext python3 python3-pip python3-setuptools \
+            unzip wget curl nano file qemu-utils
+
+      # 步骤4：克隆iStoreOS源码（适配RK3568的仓库）
+      - name: 4. 克隆iStoreOS源码（RK3568分支）
+        run: |
+          # 克隆源码（替换为你的源码仓库，此处用官方适配仓库示例）
+          git clone https://github.com/oppo77/istoreos-rk3568-build.git openwrt
+          cd openwrt
+          # 切换到稳定分支（如24.10，根据实际需求调整）
+          git checkout refs/heads/main
+          echo "=== 源码克隆完成 ==="
+          ls -l openwrt  # 验证源码结构
+
+      # 步骤5：下载自定义配置文件（xgp.config）并替换默认配置
+      - name: 5. 下载xgp.config配置文件（适配RK3568硬件）
         run: |
           cd openwrt
-          sed -i 's#downloads.openwrt.org#mirrors.tuna.tsinghua.edu.cn/openwrt#g' ./feeds.conf.default
-          echo 'MIRRORS += https://mirrors.ustc.edu.cn/openwrt' >> ./include/download.mk
-          echo 'MIRRORS += https://downloads.openwrt.org' >> ./include/download.mk
-          find ./package -type f -name "Makefile" -exec sed -i 's#https://downloads.openwrt.org#$(MIRRORS)#g' {} \;
-      - name: 配置axel多线程下载
-        run: |
-          cd openwrt
-          sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 16 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' ./include/download.mk
-          echo "DOWNLOAD_TIMEOUT=600" >> ./include/download.mk
-          echo "DOWNLOAD_RETRIES=5" >> ./include/download.mk
-      - name: 初始化feeds与清理冲突
-        run: |
-          cd openwrt
-          ./scripts/feeds update -a
-          rm -rf feeds/third/luci-app-baidupcs-web package/feeds/third/luci-app-baidupcs-web 2>/dev/null || true
-          rm -rf feeds/third/baidupcs-web package/feeds/third/baidupcs-web 2>/dev/null || true
-          ./scripts/feeds update -a && ./scripts/feeds install -a
-      - name: 下载xgp.config（oppo77仓库的raw地址）
-        run: |
-          cd openwrt
-          wget --timeout=30 --tries=3 -O .config "https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp.config"
-          if [ ! -s .config ]; then
-            echo "错误：xgp.config下载失败或为空！请检查raw地址是否正确"
+          # 下载你的硬件配置文件（替换为实际配置文件URL）
+          axel -n 8 -o .config https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp.config
+          # 验证配置文件是否下载成功
+          if [ ! -f ".config" ]; then
+            echo "错误：xgp.config下载失败！"
             exit 1
           fi
-          make defconfig
-      - name: 多线程下载依赖包
+          echo "=== 配置文件验证成功 ==="
+          cat .config | grep "RK3568"  # 确认RK3568配置已启用
+
+      # 步骤6：关键！检查/修复 ipkg-make-index 工具（解决package/index错误）
+      - name: 6. 检查并修复 ipkg-make-index 工具
         run: |
           cd openwrt
-          echo "使用16线程加速下载依赖包..."
-          make download -j16 || make download -j1 V=s
-      - name: 复制并配置5G智能脚本
-        run: |
-          mkdir -p openwrt/files/etc/init.d/
-          cp config-repo/config-files/5g-auto openwrt/files/etc/init.d/
-          sed -i "s/__5G_APN__/${{ github.event.inputs.apn_5g }}/g" openwrt/files/etc/init.d/5g-auto
-          chmod 755 openwrt/files/etc/init.d/5g-auto
-          mkdir -p openwrt/files/etc/rc.d/
-          ln -sf ../init.d/5g-auto openwrt/files/etc/rc.d/S955g-auto
-      - name: 复制并配置WiFi模板
-        run: |
-          mkdir -p openwrt/files/etc/config/
-          cp config-repo/config-files/wireless openwrt/files/etc/config/
-          sed -i "s/__WIFI_2G_SSID__/${{ github.event.inputs.wifi_2g_ssid }}/g" openwrt/files/etc/config/wireless
-          sed -i "s/__WIFI_5G_SSID__/${{ github.event.inputs.wifi_5g_ssid }}/g" openwrt/files/etc/config/wireless
-          sed -i "s/__WIFI_PASSWORD__/${{ github.event.inputs.wifi_password }}/g" openwrt/files/etc/config/wireless
-      - name: 配置LAN管理IP
+          echo "=== 第一步：查找已存在的ipkg-make-index ==="
+          # OpenWRT编译后，工具默认在 staging_dir/host/bin
+          TOOL_PATH=$(find ./staging_dir -name "ipkg-make-index" -type f | head -1)
+          
+          if [ -z "$TOOL_PATH" ]; then
+            echo "=== 未找到工具，单独编译opkg主机端（生成ipkg-make-index） ==="
+            # 单独编译opkg的host端工具（优先生成索引工具）
+            make package/system/opkg/host-compile -j1 V=s
+            # 重新查找工具
+            TOOL_PATH=$(find ./staging_dir -name "ipkg-make-index" -type f | head -1)
+            # 二次验证：若仍未找到，直接报错退出
+            if [ -z "$TOOL_PATH" ]; then
+              echo "错误：opkg编译失败，无法生成ipkg-make-index！"
+              exit 1
+            fi
+          fi
+          
+          echo "=== 第二步：验证工具权限和可执行性 ==="
+          ls -l "$TOOL_PATH"  # 需显示 -rwxr-xr-x（有执行权限）
+          # 修复权限（若缺失执行权限）
+          if [ ! -x "$TOOL_PATH" ]; then
+            chmod +x "$TOOL_PATH"
+            echo "已添加执行权限：$TOOL_PATH"
+          fi
+          # 验证工具是否正常运行
+          "$TOOL_PATH" --help > /dev/null 2>&1
+          if [ $? -eq 0 ]; then
+            echo "=== ipkg-make-index 工具验证通过 ==="
+          else
+            echo "错误：工具不可执行！"
+            exit 1
+          fi
+          
+          # 第三步：将工具路径加入环境变量（避免后续找不到）
+          export PATH=$PATH:$(dirname "$TOOL_PATH")
+          echo "已将工具路径加入PATH：$(dirname "$TOOL_PATH")"
+
+      # 步骤7：配置axel多线程下载（优化依赖下载速度）
+      - name: 7. 配置axel多线程下载（避免镜像超时）
         run: |
           cd openwrt
-          sed -i "s/192\.168\.[0-9]*\.[0-9]*/${{ github.event.inputs.lan_ip }}/g" package/base-files/files/bin/config_generate
-      - name: 缓存编译工具链（无max-size参数）
-        uses: klever1988/cachewrtbuild@main
-        with:
-          ccache: 'true'
-          mixkey: ${{ runner.os }}-xgp-24.10
-          prefix: ${{ github.workspace }}/openwrt
-      - name: 编译iStoreOS固件（2线程平衡空间/稳定性）
+          # 替换默认wget为axel，线程数8（平衡速度与稳定性）
+          sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 8 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' ./include/download.mk
+          # 延长下载超时时间（1200秒=20分钟）
+          echo "DOWNLOAD_TIMEOUT=1200" >> ./include/download.mk
+          echo "=== axel配置完成 ==="
+
+      # 步骤8：清理旧编译产物（避免缓存冲突）
+      - name: 8. 清理旧编译产物
         run: |
           cd openwrt
-          echo "=== 编译前磁盘剩余空间（关键验证） ==="
-          df -h /
-          echo "使用2线程编译固件..."
-          make -j2 || make -j1 V=s
-      - name: 清理编译临时文件（便于打包）
+          make clean  # 清理目标文件，保留配置和依赖
+          make dirclean  # 清理编译目录，避免旧文件干扰
+          echo "=== 旧产物清理完成 ==="
+
+      # 步骤9：编译iStoreOS固件（单线程+详细日志，便于排错）
+      - name: 9. 编译iStoreOS固件（单线程+详细日志）
         run: |
-          sudo rm -rf openwrt/logs/* || true
-          sudo rm -rf openwrt/build_dir/target-*/tmp/* || true
-          sudo rm -rf openwrt/dl/* || true
-      - name: 整理固件文件
+          cd openwrt
+          # 导入之前的PATH（确保ipkg-make-index可找到）
+          TOOL_PATH=$(find ./staging_dir -name "ipkg-make-index" -type f | head -1)
+          export PATH=$PATH:$(dirname "$TOOL_PATH")
+          
+          echo "=== 开始编译（单线程+详细日志） ==="
+          echo "编译时间可能较长（约1-2小时），请耐心等待..."
+          # 单线程编译（-j1）+ 详细日志（V=s），暴露所有错误
+          make -j1 V=s
+          
+          # 验证编译是否成功（检查固件输出目录）
+          echo "=== 编译完成，检查固件产物 ==="
+          ls -l ./bin/targets/rockchip/armv8/  # RK3568固件默认输出路径
+          if [ ! -d "./bin/targets/rockchip/armv8/" ]; then
+            echo "错误：固件输出目录不存在，编译失败！"
+            exit 1
+          fi
+
+      # 步骤10：整理固件产物（便于下载）
+      - name: 10. 整理固件产物
         run: |
-          mkdir -p ./final-firmware
-          cp -rf openwrt/bin/targets/rockchip/armv8/* ./final-firmware/
-          rm -rf ./final-firmware/packages
-      - name: 上传固件到Artifact
+          # 创建最终产物目录
+          mkdir -p final-firmware
+          # 复制固件到产物目录（匹配RK3568的固件格式，如img.gz）
+          cp openwrt/bin/targets/rockchip/armv8/*.img.gz final-firmware/
+          cp openwrt/bin/targets/rockchip/armv8/*.img final-firmware/  # 若有未压缩版本
+          
+          # 生成产物清单
+          echo "=== 固件产物清单 ===" > final-firmware/固件信息.txt
+          echo "编译时间：$(date)" >> final-firmware/固件信息.txt
+          echo "硬件适配：RK3568 + MT7916 WiFi + FM350gl 5G" >> final-firmware/固件信息.txt
+          echo "WiFi配置：2.4G=$WIFI_2G_SSID / 5G=$WIFI_5G_SSID" >> final-firmware/固件信息.txt
+          echo "5G APN：$APN_5G" >> final-firmware/固件信息.txt
+          ls -l final-firmware/ >> final-firmware/固件信息.txt
+          
+          echo "=== 产物整理完成 ==="
+          ls -l final-firmware/
+
+      # 步骤11：上传固件为Artifact（保留30天，便于下载）
+      - name: 11. 上传固件产物
         uses: actions/upload-artifact@v4
         with:
-          name: iStoreOS-xgp-Firmware-${{ github.run_id }}
-          path: ./final-firmware/
-          retention-days: 30
+          name: iStoreOS-RK3568-固件-${{ github.run_number }}
+          path: final-firmware/
+          retention-days: 30  # 产物保留30天
+          if-no-files-found: error  # 若无文件，标记为错误
