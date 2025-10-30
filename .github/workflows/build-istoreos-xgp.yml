@@ -57,7 +57,6 @@ jobs:
             find custom-files -type f
           else
             echo "❌ custom-files 目录不存在！"
-            # 创建基础目录结构
             mkdir -p custom-files/{usr/bin,etc/{init.d,hotplug.d/usb,config}}
             echo "✅ 已创建基础目录结构"
           fi
@@ -83,9 +82,7 @@ jobs:
       - name: 6. 安装编译依赖
         run: |
           sudo apt-get update -y
-          DEPS="ccache git build-essential libncurses5-dev libssl-dev \
-            flex bison make gcc g++ gettext python3 python3-pip \
-            unzip wget curl file qemu-utils libtool axel rsync"
+          DEPS="ccache git build-essential libncurses5-dev libssl-dev flex bison make gcc g++ gettext python3 python3-pip unzip wget curl file qemu-utils libtool axel rsync"
           sudo apt-get install -y $DEPS
           
           sudo /usr/sbin/update-ccache-symlinks
@@ -106,7 +103,6 @@ jobs:
             git pull --depth 1
           fi
           
-          # 验证源码结构
           echo "iStoreOS目录结构:"
           ls -la
           if [ ! -f "Makefile" ]; then
@@ -117,15 +113,10 @@ jobs:
       - name: 8. 集成5G自动启动和WiFi配置
         run: |
           cd istoreos
-          
-          # 创建目标目录结构
           mkdir -p files/usr/bin files/etc/init.d files/etc/hotplug.d/usb files/etc/config
           
-          # 检查custom-files是否存在，如果不存在则创建基础文件
           if [ ! -f "../custom-files/usr/bin/5g-auto-start.sh" ]; then
             echo "⚠️  自定义文件不存在，创建基础版本..."
-            
-            # 创建基础5G启动脚本
             cat > files/usr/bin/5g-auto-start.sh << 'EOF'
 #!/bin/bash
 echo "5G自动启动脚本占位符 - 请配置完整的custom-files目录"
@@ -133,7 +124,6 @@ echo "WiFi SSID: ${{ github.event.inputs.wifi_2g_ssid }} / ${{ github.event.inpu
 EOF
             chmod +x files/usr/bin/5g-auto-start.sh
             
-            # 创建基础init脚本
             cat > files/etc/init.d/5g-auto << 'EOF'
 #!/bin/sh /etc/rc.common
 START=99
@@ -141,23 +131,19 @@ start() { echo "5G服务启动"; }
 stop() { echo "5G服务停止"; }
 EOF
             chmod +x files/etc/init.d/5g-auto
-            
           else
-            # 复制现有的自定义文件
             cp ../custom-files/usr/bin/5g-auto-start.sh files/usr/bin/
             chmod +x files/usr/bin/5g-auto-start.sh
-            
             cp ../custom-files/etc/init.d/5g-auto files/etc/init.d/
             chmod +x files/etc/init.d/5g-auto
-            
             if [ -f "../custom-files/etc/hotplug.d/usb/30-5g-modem" ]; then
               cp ../custom-files/etc/hotplug.d/usb/30-5g-modem files/etc/hotplug.d/usb/
               chmod +x files/etc/hotplug.d/usb/30-5g-modem
             fi
           fi
           
-          # 创建WiFi配置（使用单引号避免变量展开问题）
-          cat > files/etc/config/wireless << 'EOF'
+          # 创建WiFi配置 - 简化版本，避免复杂语法
+          cat > files/etc/config/wireless << "ENDOFFILE"
 config wifi-device 'radio0'
     option type 'mac80211'
     option path 'platform/soc/fe300000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0'
@@ -191,9 +177,8 @@ config wifi-iface 'default_radio1'
     option ssid 'iStoreOS-5G'
     option encryption 'psk2'
     option key '12345678'
-EOF
+ENDOFFILE
           
-          # 使用sed替换WiFi配置中的占位符
           sed -i "s/iStoreOS-2.4G/${{ github.event.inputs.wifi_2g_ssid }}/g" files/etc/config/wireless
           sed -i "s/iStoreOS-5G/${{ github.event.inputs.wifi_5g_ssid }}/g" files/etc/config/wireless
           sed -i "s/12345678/${{ github.event.inputs.wifi_2g_pass }}/g" files/etc/config/wireless
@@ -211,7 +196,6 @@ EOF
             exit 1
           fi
           
-          # 验证配置文件基本内容
           if grep -q "CONFIG_TARGET_rockchip" .config; then
             echo "✅ iStoreOS配置文件下载和验证完成"
           else
@@ -269,18 +253,12 @@ EOF
           export CCACHE_DIR=${{ env.CCACHE_DIR }}
           
           echo "🏗️ 开始编译iStoreOS固件..."
-          # 先做defconfig确保配置正确
           make defconfig 2>&1 | tee ${{ env.LOG_DIR }}/defconfig.log
-          
-          # 主要编译过程
           make -j$JOB_COUNT V=sc 2>&1 | tee ${{ env.LOG_DIR }}/compile.log
           
-          # 检查编译结果
           if [ ! -d "${{ env.FIRMWARE_DIR }}" ] || ! ls "${{ env.FIRMWARE_DIR }}"/*.img* >/dev/null 2>&1; then
             echo "❌ iStoreOS固件生成失败，尝试单线程编译..."
             make -j1 V=s 2>&1 | tee -a ${{ env.LOG_DIR }}/compile.log
-            
-            # 如果单线程也失败，输出错误信息
             if [ ! -d "${{ env.FIRMWARE_DIR }}" ]; then
               echo "❌ 编译彻底失败，请检查日志"
               exit 1
@@ -310,7 +288,6 @@ EOF
         run: |
           mkdir -p istoreos-firmware
           
-          # 复制固件文件
           if [ -d "istoreos/${{ env.FIRMWARE_DIR }}" ]; then
             cp "istoreos/${{ env.FIRMWARE_DIR }}"/*.img* istoreos-firmware/ 2>/dev/null || true
             cp "istoreos/${{ env.FIRMWARE_DIR }}"/*.manifest istoreos-firmware/ 2>/dev/null || true
@@ -319,13 +296,12 @@ EOF
           fi
           
           cd istoreos-firmware
-          # 生成校验文件
           for file in *.img*; do
             [ -e "$file" ] && md5sum "$file" >> MD5校验值.txt
           done
           
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
-          cat > 固件信息.txt << EOF
+          cat > 固件信息.txt << "EOF"
 ======================================
            iStoreOS固件信息            
 ======================================
