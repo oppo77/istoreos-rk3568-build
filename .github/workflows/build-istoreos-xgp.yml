@@ -45,7 +45,7 @@ jobs:
           path: |
             ${{ env.CCACHE_DIR }}
             /var/cache/apt/archives
-          key: "${{ runner.os }}-build-cache-${{ github.sha | slice: 0, 8 }}"
+          key: "${{ runner.os }}-build-cache-${{ github.sha.substr(0,8) }}"  # 改用substr，无|符号
           restore-keys: |
             "${{ runner.os }}-build-cache-"
 
@@ -205,7 +205,7 @@ jobs:
       - name: 10. 上传固件产物
         uses: actions/upload-artifact@v4
         with:
-          name: "iStoreOS-RK3568-固件-${{ github.run_number }}-${{ github.sha | slice: 0, 8 }}"
+          name: "iStoreOS-RK3568-固件-${{ github.run_number }}-${{ github.sha.substr(0,8) }}"  # 改用substr，无|符号
           path: final-firmware/
           retention-days: 30
           if-no-files-found: error
