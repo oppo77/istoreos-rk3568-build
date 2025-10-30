@@ -44,17 +44,20 @@ jobs:
           echo "=== 精简前磁盘空间状态 ==="
           df -h
 
+          # 清理 APT 缓存和无用依赖
           sudo apt clean && sudo apt autoclean
           sudo apt autoremove -y --purge
 
-          sudo apt purge -y \
-            libreoffice* rhythmbox* totem* gnome-* thunderbird* transmission* \
-            shotwell* cheese* simple-scan* aisleriot* gnome-mines* gnome-sudoku* \
-            remmina* vinagre* xterm* yelp* zenity* snapd* flatpak*
+          # 删除大型冗余软件（仅保留与编译无关的桌面/办公工具）
+          sudo apt purge -y libreoffice* rhythmbox* totem* gnome-* thunderbird* transmission* \
+            shotwell* cheese* simple-scan* aisleriot* gnome-mines* gnome-sudoku* remmina* \
+            vinagre* xterm* yelp* zenity* snapd* flatpak*
 
+          # 清理残留文件
           sudo rm -rf /var/lib/snapd /snap /var/snap /usr/lib/snapd /var/lib/flatpak
           sudo rm -rf /var/log/*.log /var/log/*.gz /tmp/* /var/tmp/* /var/cache/*
 
+          # 清理 Docker 残留
           if command -v docker >/dev/null 2>&1; then
             sudo systemctl stop docker && sudo rm -rf /var/lib/docker
           fi
@@ -71,14 +74,18 @@ jobs:
           fetch-depth: 1
 
       ###########################################################################
-      # 步骤2：安装编译依赖（修复 getopt 问题）
+      # 步骤2：安装编译依赖（修复空包名问题，整理有效包列表）
       ###########################################################################
       - name: 2. 安装 Ubuntu 编译依赖
         run: |
-          sudo apt update -y && sudo apt full-upgrade -y
+          # 强制更新 apt 源，确保包列表最新
+          sudo apt update -y --fix-missing
+          sudo apt full-upgrade -y
+
+          # 安装核心依赖（去重+修正包名+删除无效项）
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-            binutils diffutils findutils coreutils make perl which \  # 移除单独的 getopt（已包含在 coreutils）
+            binutils diffutils findutils coreutils make perl which \
             git subversion rsync curl wget axel p7zip p7zip-full unzip \
             gettext libncurses5-dev libncursesw5-dev libssl-dev libreadline-dev \
             libpython3-dev python3 python3-pip python3-setuptools \
@@ -89,6 +96,7 @@ jobs:
             ack antlr3 asciidoc autoconf automake autopoint patch pkgconf \
             gperf haveged help2man intltool llvm lrzsz uglifyjs upx-ucl vim
 
+          # 安装 Python 工具（通过 pip，避免 apt 包名冲突）
           sudo pip3 install pyelftools
 
       ###########################################################################
@@ -100,11 +108,13 @@ jobs:
           cd istoreos-src
           git checkout main
 
+          # 替换 feeds 源
           mv feeds.conf.default feeds.conf.default.bak
           echo "${FEEDS_CONF_CONTENT}" > feeds.conf.default
           echo -e "\n当前 feeds 源配置："
           cat feeds.conf.default
 
+          # 更新并安装 feeds 包
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -117,6 +127,7 @@ jobs:
           cd istoreos-src
           make defconfig
 
+          # 验证关键配置是否生效
           echo -e "\n验证关键配置："
           grep -E "CONFIG_PACKAGE_quectel-CM-5G-M|CONFIG_PACKAGE_kmod-mt7916|CONFIG_PACKAGE_luci" .config
 
@@ -319,15 +330,17 @@ jobs:
         run: |
           cd istoreos-src
           echo "CPU 核心数：$(nproc)"
-          make -j$(nproc) V=s  # 内存不足可改为 -j4
+          # 内存不足时改为 -j2 或 -j4
+          make -j$(nproc) V=s
 
-          echo -e "\n编译产物："
+          # 显示编译产物
+          echo -e "\n编译产物列表："
           ls -lh bin/targets/${TARGET_DEVICE}/${TARGET_PROFILE}/*.img.gz
 
       ###########################################################################
       # 步骤9：上传固件
       ###########################################################################
-      - name: 9. 上传固件
+      - name: 9. 上传固件产物
         uses: actions/upload-artifact@v4
         with:
           name: istoreos-firmware-${{ env.TARGET_DEVICE }}-${{ env.TARGET_PROFILE }}
