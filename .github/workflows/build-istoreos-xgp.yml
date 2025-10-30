@@ -1,4 +1,4 @@
-name: 编译 iStoreOS 固件（RK3568 + 优化编译时间）
+name: 编译 iStoreOS 固件（RK3568 + 5G自动启动集成）
 
 env:
   SOURCE_REPO: "https://github.com/oppo77/istoreos-rk3568-build.git"
@@ -62,16 +62,14 @@ jobs:
           sudo apt-get clean
           df -h /
 
-      - name: 4. 安装iStoreOS编译依赖
+      - name: 4. 安装编译依赖
         run: |
           sudo apt-get update -y
-          # iStoreOS编译依赖
           DEPS="ccache git build-essential libncurses5-dev libssl-dev \
             flex bison make gcc g++ gettext python3 python3-pip \
             unzip wget curl file qemu-utils libtool axel rsync"
           sudo apt-get install -y $DEPS
           
-          # 配置ccache
           sudo /usr/sbin/update-ccache-symlinks
           echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
           ccache -M 5G
@@ -89,62 +87,78 @@ jobs:
             cd istoreos
             git pull --depth 1
           fi
-          
-          # 验证iStoreOS特定目录
-          if [ ! -d "package/istore" ] && [ ! -d "package/luci-app-store" ]; then
-            echo "⚠️  未找到iStoreOS特定包，但继续编译..."
-          fi
 
-      - name: 6. 下载iStoreOS配置文件
+      - name: 6. 创建日志目录
+        run: |
+          mkdir -p ${{ env.LOG_DIR }}
+          echo "✅ 日志目录创建完成：${{ env.LOG_DIR }}"
+
+      - name: 7. 集成5G自动启动和WiFi配置
+        run: |
+          cd istoreos
+          
+          # 创建目标目录结构
+          mkdir -p files/usr/bin files/etc/init.d files/etc/hotplug.d/usb files/etc/config
+          
+          # 复制5G自动启动脚本
+          cp ../custom-files/usr/bin/5g-auto-start.sh files/usr/bin/
+          chmod +x files/usr/bin/5g-auto-start.sh
+          
+          # 复制init服务脚本
+          cp ../custom-files/etc/init.d/5g-auto files/etc/init.d/
+          chmod +x files/etc/init.d/5g-auto
+          
+          # 复制热插拔脚本
+          cp ../custom-files/etc/hotplug.d/usb/30-5g-modem files/etc/hotplug.d/usb/
+          chmod +x files/etc/hotplug.d/usb/30-5g-modem
+          
+          # 复制并自定义WiFi配置
+          cp ../custom-files/etc/config/wireless files/etc/config/
+          
+          # 使用工作流输入参数替换WiFi配置
+          sed -i "s/iStoreOS-2.4G/${{ github.event.inputs.wifi_2g_ssid }}/g" files/etc/config/wireless
+          sed -i "s/iStoreOS-5G/${{ github.event.inputs.wifi_5g_ssid }}/g" files/etc/config/wireless
+          sed -i "s/12345678/${{ github.event.inputs.wifi_2g_pass }}/g" files/etc/config/wireless
+          
+          echo "✅ 5G自动启动和WiFi配置集成完成"
+
+      - name: 8. 下载iStoreOS配置文件
         run: |
           cd istoreos
           wget -q -O .config ${{ env.CONFIG_URL }}
           echo "✅ iStoreOS配置文件下载完成"
-          
-          # 验证配置文件
-          if ! grep -q "iStoreOS" .config 2>/dev/null; then
-            echo "⚠️  配置文件中未找到iStoreOS标识"
-          fi
 
-      - name: 7. 应用iStoreOS优化配置
+      - name: 9. 应用编译优化配置
         run: |
           cd istoreos
-          # 启用iStoreOS优化配置
           echo "CONFIG_CCACHE=y" >> .config
           echo "CONFIG_BUILD_LOG=y" >> .config
-          
-          # 确保iStoreOS品牌设置
-          if ! grep -q "CONFIG_VERSION_DIST" .config; then
-            echo 'CONFIG_VERSION_DIST="iStoreOS"' >> .config
-          fi
-          
-          echo "✅ iStoreOS优化配置应用完成"
+          echo "✅ 编译优化配置应用完成"
 
-      - name: 8. 配置下载加速
+      - name: 10. 配置下载加速
         run: |
           cd istoreos
-          # 使用axel多线程下载
           if ! grep -q "WGET_CMD.*axel" include/download.mk; then
             sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 16 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' include/download.mk
           fi
           echo "DOWNLOAD_TIMEOUT=1800" >> include/download.mk
+          echo "✅ 下载加速配置完成"
 
-      - name: 9. 预下载iStoreOS资源
+      - name: 11. 预下载资源文件
         run: |
           cd istoreos
           export FORCE_UNSAFE_CONFIGURE=1
-          echo "📥 开始预下载iStoreOS资源文件..."
-          make download -j$(nproc) || make download -j2
-          echo "✅ iStoreOS资源文件下载完成"
+          echo "📥 开始预下载资源文件..."
+          make download -j$(nproc) 2>&1 | tee ${{ env.LOG_DIR }}/download.log || make download -j2 2>&1 | tee -a ${{ env.LOG_DIR }}/download.log
+          echo "✅ 资源文件下载完成"
 
-      - name: 10. 配置编译环境
+      - name: 12. 配置编译环境
         run: |
           cd istoreos
           export FORCE_UNSAFE_CONFIGURE=1
           export CCACHE_DIR=${{ env.CCACHE_DIR }}
           ccache -z
           
-          # 智能线程计算
           CPU_CORES=$(nproc)
           MEMORY_GB=$(free -g | awk 'NR==2{print $2}')
           if [ $MEMORY_GB -ge 16 ]; then
@@ -155,9 +169,9 @@ jobs:
             JOB_COUNT=$((CPU_CORES / 2))
           fi
           echo "JOB_COUNT=$JOB_COUNT" >> $GITHUB_ENV
-          echo "使用 $JOB_COUNT 个线程编译iStoreOS"
+          echo "使用 $JOB_COUNT 个线程编译iStoreOS（CPU: $CPU_CORES, 内存: ${MEMORY_GB}GB）"
 
-      - name: 11. 编译iStoreOS固件
+      - name: 13. 编译iStoreOS固件
         run: |
           cd istoreos
           export FORCE_UNSAFE_CONFIGURE=1
@@ -173,36 +187,34 @@ jobs:
             make -j1 V=s 2>&1 | tee -a ${{ env.LOG_DIR }}/compile.log
           fi
 
-      - name: 12. 显示编译统计
+      - name: 14. 显示编译统计
         run: |
           cd istoreos
-          ccache -s
+          ccache -s 2>&1 | tee ${{ env.LOG_DIR }}/ccache.log
           echo "iStoreOS编译完成"
 
-      - name: 13. 验证iStoreOS输出文件
+      - name: 15. 验证iStoreOS输出文件
         run: |
           cd istoreos
-          echo "📁 iStoreOS固件输出目录:"
+          echo "📁 iStoreOS固件输出目录:" 2>&1 | tee ${{ env.LOG_DIR }}/verify.log
           if [ -d "${{ env.FIRMWARE_DIR }}" ]; then
-            ls -la "${{ env.FIRMWARE_DIR }}/"
-            echo "✅ iStoreOS固件生成成功"
+            ls -la "${{ env.FIRMWARE_DIR }}/" 2>&1 | tee -a ${{ env.LOG_DIR }}/verify.log
+            echo "✅ iStoreOS固件生成成功" 2>&1 | tee -a ${{ env.LOG_DIR }}/verify.log
           else
-            echo "❌ iStoreOS固件目录不存在"
-            # 尝试查找其他可能的输出目录
-            find ./bin -name "*.img*" -type f | head -10
+            echo "❌ iStoreOS固件目录不存在" 2>&1 | tee -a ${{ env.LOG_DIR }}/verify.log
+            find ./bin -name "*.img*" -type f | head -10 2>&1 | tee -a ${{ env.LOG_DIR }}/verify.log
             exit 1
           fi
 
-      - name: 14. 整理iStoreOS产物
+      - name: 16. 整理iStoreOS产物
         run: |
           mkdir -p istoreos-firmware
           
           # 复制固件文件
-          if [ -d "${{ env.FIRMWARE_DIR }}" ]; then
-            cp "${{ env.FIRMWARE_DIR }}"/*.img* istoreos-firmware/ 2>/dev/null || true
-            cp "${{ env.FIRMWARE_DIR }}"/*.manifest istoreos-firmware/ 2>/dev/null || true
+          if [ -d "istoreos/${{ env.FIRMWARE_DIR }}" ]; then
+            cp "istoreos/${{ env.FIRMWARE_DIR }}"/*.img* istoreos-firmware/ 2>/dev/null || true
+            cp "istoreos/${{ env.FIRMWARE_DIR }}"/*.manifest istoreos-firmware/ 2>/dev/null || true
           else
-            # 备用查找方式
             find ./istoreos/bin -name "*.img*" -exec cp {} istoreos-firmware/ \; 2>/dev/null || true
           fi
           
@@ -219,23 +231,27 @@ jobs:
           echo "设备：RK3568 (XGP)" >> 固件信息.txt
           echo "编译时间：$(date +"%Y-%m-%d %H:%M:%S")" >> 固件信息.txt
           echo "Git提交：$SHORT_SHA" >> 固件信息.txt
-          echo "版本：iStoreOS" >> 固件信息.txt
-          echo "优化：编译时间优化版本" >> 固件信息.txt
+          echo "版本：iStoreOS + 5G自动启动" >> 固件信息.txt
+          echo "特性：刷机后自动启动5G和WiFi" >> 固件信息.txt
+          echo "2.4G WiFi：${{ github.event.inputs.wifi_2g_ssid }}" >> 固件信息.txt
+          echo "5G WiFi：${{ github.event.inputs.wifi_5g_ssid }}" >> 固件信息.txt
+          echo "5G APN：${{ github.event.inputs.apn_5g }}" >> 固件信息.txt
           echo "======================================" >> 固件信息.txt
           [ -f "MD5校验值.txt" ] && cat MD5校验值.txt >> 固件信息.txt
 
-      - name: 15. 上传iStoreOS固件产物
+      - name: 17. 上传iStoreOS固件产物
         uses: actions/upload-artifact@v4
         with:
-          name: "iStoreOS-RK3568-固件-${{ github.run_number }}-$(echo ${{ github.sha }} | cut -c1-8)"
+          name: "iStoreOS-RK3568-5G自动版-${{ github.run_number }}-$(echo ${{ github.sha }} | cut -c1-8)"
           path: istoreos-firmware/
           retention-days: 30
           if-no-files-found: error
 
-      - name: 16. 上传编译日志
+      - name: 18. 上传编译日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: "iStoreOS编译日志-${{ github.run_number }}"
           path: ${{ env.LOG_DIR }}/
           retention-days: 15
+          if-no-files-found: warn
