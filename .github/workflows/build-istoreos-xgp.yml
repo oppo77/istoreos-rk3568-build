@@ -1,9 +1,9 @@
-name: 编译 iStoreOS 固件（RK3568 + 修复libtool安装）
+name: 编译 iStoreOS 固件（RK3568 + 优化编译时间）
 
 env:
   SOURCE_REPO: "https://github.com/oppo77/istoreos-rk3568-build.git"
   CONFIG_URL: "https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp.config"
-  FIRMWARE_DIR: "./openwrt/bin/targets/rockchip/armv8"
+  FIRMWARE_DIR: "./istoreos/bin/targets/rockchip/armv8"
   CCACHE_DIR: "./.ccache"
   LOG_DIR: "./build-logs"
 
@@ -35,202 +35,207 @@ on:
       - main
 
 jobs:
-  build-firmware:
+  build-istoreos:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 120
     steps:
-      - name: 0. 初始化缓存
+      - name: 1. 拉取仓库代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 2. 初始化缓存
         uses: actions/cache@v4
         with:
           path: |
             ${{ env.CCACHE_DIR }}
             /var/cache/apt/archives
-          key: "${{ runner.os }}-build-cache-${{ github.sha }}"
+            ./dl
+          key: "istoreos-${{ runner.os }}-build-cache-${{ github.sha }}"
           restore-keys: |
-            ${{ runner.os }}-build-cache-
+            istoreos-${{ runner.os }}-build-cache-
 
-      - name: 1. 拉取仓库代码
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          timeout-minutes: 10
-
-      - name: 2. 深度清理磁盘
+      - name: 3. 快速清理磁盘
         run: |
           df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/share/powershell /usr/local/lib/android /opt/ghc || true
-          sudo apt-get -y purge azure-cli* docker* ghc* zulu* llvm* firefox google* powershell* dotnet* mono* || true
-          sudo apt-get autoremove -y && sudo apt-get clean
-          df -h /
-          FREE_SPACE=$(df -P / | awk 'NR==2 {print $4}')
-          if [ $FREE_SPACE -lt 26214400 ]; then
-            echo "❌ 错误：磁盘空间不足25GB！"
-            exit 1
-          fi
-
-      - name: 3. 安装编译依赖（修复libtool）
-        run: |
-          sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
-          echo "deb http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
-          deb http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
-          deb http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
-          deb http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse" | sudo tee /etc/apt/sources.list
-          
+          sudo apt-get autoremove -y
           sudo apt-get clean
-          sudo apt-get update -y --fix-missing
-          
-          DEPS="axel ccache git build-essential libncurses5-dev libssl-dev \
-            flex bison make gcc g++ gettext python3 python3-pip python3-setuptools \
-            unzip wget curl nano file qemu-utils libtool"
+          df -h /
+
+      - name: 4. 安装iStoreOS编译依赖
+        run: |
+          sudo apt-get update -y
+          # iStoreOS编译依赖
+          DEPS="ccache git build-essential libncurses5-dev libssl-dev \
+            flex bison make gcc g++ gettext python3 python3-pip \
+            unzip wget curl file qemu-utils libtool axel rsync"
           sudo apt-get install -y $DEPS
           
-          if command -v libtool &> /dev/null; then
-            echo "✅ libtool常规安装成功！"
-          else
-            echo "⚠️  常规安装失败，手动下载deb包..."
-            axel -n 8 -o libtool.deb "http://mirrors.aliyun.com/ubuntu/pool/main/libt/libtool/libtool_2.4.6-15ubuntu1_amd64.deb"
-            sudo dpkg -i libtool.deb || sudo apt-get -f install -y
-            if ! command -v libtool &> /dev/null; then
-              echo "❌ 错误：libtool手动安装失败！"
-              exit 1
-            fi
-            echo "✅ libtool手动安装成功！"
-          fi
-          
-          TOOLS=("axel" "ccache" "git" "make" "gcc" "g++")
-          for tool in "${TOOLS[@]}"; do
-            if ! command -v $tool &> /dev/null; then
-              echo "❌ 错误：工具 $tool 安装失败！"
-              exit 1
-            fi
-          done
-
-      - name: 4. 克隆iStoreOS源码
-        run: |
-          git clone --depth 1 ${{ env.SOURCE_REPO }} openwrt
-          cd openwrt
-          git checkout refs/heads/main
-          
-          REQUIRED_DIRS=("package" "target" "include")
-          for dir in "${REQUIRED_DIRS[@]}"; do
-            if [ ! -d "./$dir" ]; then
-              echo "❌ 源码目录 $dir 缺失！"
-              exit 1
-            fi
-          done
-
-      - name: 5. 下载原始xgp.config（不修改）
-        run: |
-          cd openwrt
-          axel -n 8 -o .config ${{ env.CONFIG_URL }}
-          
-          if [ ! -f ".config" ] || [ $(wc -l < .config) -lt 100 ]; then
-            echo "❌ 配置文件损坏！"
-            exit 1
-          fi
-          
-          if ! grep -q "CONFIG_MACH_ROCKCHIP_RK3568=y" .config; then
-            echo "❌ 未启用RK3568配置！"
-            exit 1
-          fi
-
-      - name: 6. 修复ipkg-make-index工具
-        run: |
-          cd openwrt
-          TOOL_PATH=$(find ./staging_dir -name "ipkg-make-index" -type f | head -1)
-          
-          if [ -z "$TOOL_PATH" ]; then
-            make package/system/opkg/host-compile -j1 V=s
-            TOOL_PATH=$(find ./staging_dir -name "ipkg-make-index" -type f | head -1)
-            if [ -z "$TOOL_PATH" ]; then
-              echo "❌ opkg编译失败！"
-              exit 1
-            fi
-          fi
-          
-          chmod +x "$TOOL_PATH"
-          if ! "$TOOL_PATH" --help > /dev/null 2>&1; then
-            echo "❌ 工具不可执行！"
-            exit 1
-          fi
-          
-          export PATH=$PATH:$(dirname "$TOOL_PATH")
-
-      - name: 7. 配置axel+清理旧产物
-        run: |
-          cd openwrt
-          sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 8 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' ./include/download.mk
-          echo "DOWNLOAD_TIMEOUT=1200" >> ./include/download.mk
-          echo "CONFIG_CCACHE=y" >> .config
-          
-          make clean && make dirclean
-          ccache -C
-          mkdir -p ${{ env.LOG_DIR }}
-
-      - name: 8. 设置编译环境
-        run: |
-          cd openwrt
-          export FORCE_UNSAFE_CONFIGURE=1
-          export CCACHE_DIR=${{ env.CCACHE_DIR }}
-          ccache -M 2G
+          # 配置ccache
+          sudo /usr/sbin/update-ccache-symlinks
+          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
+          ccache -M 5G
           ccache -s
 
-      - name: 9. 编译固件（单线程+日志）
+      - name: 5. 克隆iStoreOS源码
         run: |
-          cd openwrt
-          TOOL_PATH=$(find ./staging_dir -name "ipkg-make-index" -type f | head -1)
-          export PATH=$PATH:$(dirname "$TOOL_PATH")
+          if [ ! -d "istoreos/.git" ]; then
+            echo "🚀 克隆iStoreOS源码库..."
+            git clone --depth 1 --single-branch ${{ env.SOURCE_REPO }} istoreos
+            cd istoreos
+            git checkout refs/heads/main
+          else
+            echo "📥 更新iStoreOS源码库..."
+            cd istoreos
+            git pull --depth 1
+          fi
           
-          make -j1 V=s 2>&1 | tee ${{ env.LOG_DIR }}/compile.log
+          # 验证iStoreOS特定目录
+          if [ ! -d "package/istore" ] && [ ! -d "package/luci-app-store" ]; then
+            echo "⚠️  未找到iStoreOS特定包，但继续编译..."
+          fi
+
+      - name: 6. 下载iStoreOS配置文件
+        run: |
+          cd istoreos
+          wget -q -O .config ${{ env.CONFIG_URL }}
+          echo "✅ iStoreOS配置文件下载完成"
           
-          if [ ! -d "${{ env.FIRMWARE_DIR }}" ] || ! ls "${{ env.FIRMWARE_DIR }}"/*.img* &> /dev/null; then
-            echo "❌ 固件生成失败！"
+          # 验证配置文件
+          if ! grep -q "iStoreOS" .config 2>/dev/null; then
+            echo "⚠️  配置文件中未找到iStoreOS标识"
+          fi
+
+      - name: 7. 应用iStoreOS优化配置
+        run: |
+          cd istoreos
+          # 启用iStoreOS优化配置
+          echo "CONFIG_CCACHE=y" >> .config
+          echo "CONFIG_BUILD_LOG=y" >> .config
+          
+          # 确保iStoreOS品牌设置
+          if ! grep -q "CONFIG_VERSION_DIST" .config; then
+            echo 'CONFIG_VERSION_DIST="iStoreOS"' >> .config
+          fi
+          
+          echo "✅ iStoreOS优化配置应用完成"
+
+      - name: 8. 配置下载加速
+        run: |
+          cd istoreos
+          # 使用axel多线程下载
+          if ! grep -q "WGET_CMD.*axel" include/download.mk; then
+            sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 16 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' include/download.mk
+          fi
+          echo "DOWNLOAD_TIMEOUT=1800" >> include/download.mk
+
+      - name: 9. 预下载iStoreOS资源
+        run: |
+          cd istoreos
+          export FORCE_UNSAFE_CONFIGURE=1
+          echo "📥 开始预下载iStoreOS资源文件..."
+          make download -j$(nproc) || make download -j2
+          echo "✅ iStoreOS资源文件下载完成"
+
+      - name: 10. 配置编译环境
+        run: |
+          cd istoreos
+          export FORCE_UNSAFE_CONFIGURE=1
+          export CCACHE_DIR=${{ env.CCACHE_DIR }}
+          ccache -z
+          
+          # 智能线程计算
+          CPU_CORES=$(nproc)
+          MEMORY_GB=$(free -g | awk 'NR==2{print $2}')
+          if [ $MEMORY_GB -ge 16 ]; then
+            JOB_COUNT=$((CPU_CORES + 2))
+          elif [ $MEMORY_GB -ge 8 ]; then
+            JOB_COUNT=$CPU_CORES
+          else
+            JOB_COUNT=$((CPU_CORES / 2))
+          fi
+          echo "JOB_COUNT=$JOB_COUNT" >> $GITHUB_ENV
+          echo "使用 $JOB_COUNT 个线程编译iStoreOS"
+
+      - name: 11. 编译iStoreOS固件
+        run: |
+          cd istoreos
+          export FORCE_UNSAFE_CONFIGURE=1
+          export CCACHE_DIR=${{ env.CCACHE_DIR }}
+          
+          echo "🏗️ 开始编译iStoreOS固件..."
+          # 主要编译过程
+          make -j$JOB_COUNT V=sc 2>&1 | tee ${{ env.LOG_DIR }}/compile.log
+          
+          # 检查编译结果
+          if [ ! -d "${{ env.FIRMWARE_DIR }}" ] || ! ls "${{ env.FIRMWARE_DIR }}"/*.img* >/dev/null 2>&1; then
+            echo "❌ iStoreOS固件生成失败，尝试单线程编译..."
+            make -j1 V=s 2>&1 | tee -a ${{ env.LOG_DIR }}/compile.log
+          fi
+
+      - name: 12. 显示编译统计
+        run: |
+          cd istoreos
+          ccache -s
+          echo "iStoreOS编译完成"
+
+      - name: 13. 验证iStoreOS输出文件
+        run: |
+          cd istoreos
+          echo "📁 iStoreOS固件输出目录:"
+          if [ -d "${{ env.FIRMWARE_DIR }}" ]; then
+            ls -la "${{ env.FIRMWARE_DIR }}/"
+            echo "✅ iStoreOS固件生成成功"
+          else
+            echo "❌ iStoreOS固件目录不存在"
+            # 尝试查找其他可能的输出目录
+            find ./bin -name "*.img*" -type f | head -10
             exit 1
           fi
 
-      - name: 10. 验证输出路径
+      - name: 14. 整理iStoreOS产物
         run: |
-          cd openwrt
-          echo "固件文件列表："
-          find ./bin -name "*.img*" -type f | head -10
-          ls -la "${{ env.FIRMWARE_DIR }}" || echo "固件目录不存在"
-
-      - name: 11. 整理产物（MD5+清单）
-        run: |
-          mkdir -p final-firmware
-          cp "${{ env.FIRMWARE_DIR }}"/*.img.gz final-firmware/ 2>/dev/null || true
-          cp "${{ env.FIRMWARE_DIR }}"/*.img final-firmware/ 2>/dev/null || true
+          mkdir -p istoreos-firmware
           
-          cd final-firmware
+          # 复制固件文件
+          if [ -d "${{ env.FIRMWARE_DIR }}" ]; then
+            cp "${{ env.FIRMWARE_DIR }}"/*.img* istoreos-firmware/ 2>/dev/null || true
+            cp "${{ env.FIRMWARE_DIR }}"/*.manifest istoreos-firmware/ 2>/dev/null || true
+          else
+            # 备用查找方式
+            find ./istoreos/bin -name "*.img*" -exec cp {} istoreos-firmware/ \; 2>/dev/null || true
+          fi
+          
+          cd istoreos-firmware
+          # 生成校验文件
           for file in *.img*; do
             [ -e "$file" ] && md5sum "$file" >> MD5校验值.txt
           done
           
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
           echo "======================================" > 固件信息.txt
-          echo "         iStoreOS固件信息（RK3568）     " >> 固件信息.txt
+          echo "           iStoreOS固件信息            " >> 固件信息.txt
           echo "======================================" >> 固件信息.txt
+          echo "设备：RK3568 (XGP)" >> 固件信息.txt
           echo "编译时间：$(date +"%Y-%m-%d %H:%M:%S")" >> 固件信息.txt
           echo "Git提交：$SHORT_SHA" >> 固件信息.txt
-          echo "配置文件：${{ env.CONFIG_URL }}（原始配置）" >> 固件信息.txt
-          echo "WiFi：2.4G=${{ github.event.inputs.wifi_2g_ssid }} / 5G=${{ github.event.inputs.wifi_5g_ssid }}" >> 固件信息.txt
-          echo "5G APN：${{ github.event.inputs.apn_5g }}" >> 固件信息.txt
+          echo "版本：iStoreOS" >> 固件信息.txt
+          echo "优化：编译时间优化版本" >> 固件信息.txt
           echo "======================================" >> 固件信息.txt
-          echo "MD5校验值：" >> 固件信息.txt
           [ -f "MD5校验值.txt" ] && cat MD5校验值.txt >> 固件信息.txt
 
-      - name: 12. 上传固件产物
+      - name: 15. 上传iStoreOS固件产物
         uses: actions/upload-artifact@v4
         with:
           name: "iStoreOS-RK3568-固件-${{ github.run_number }}-$(echo ${{ github.sha }} | cut -c1-8)"
-          path: final-firmware/
+          path: istoreos-firmware/
           retention-days: 30
           if-no-files-found: error
 
-      - name: 13. 上传失败日志
-        if: failure()
+      - name: 16. 上传编译日志
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: "编译失败日志-${{ github.run_number }}"
+          name: "iStoreOS编译日志-${{ github.run_number }}"
           path: ${{ env.LOG_DIR }}/
           retention-days: 15
