@@ -61,7 +61,6 @@ jobs:
             mkdir -p custom-files/{usr/bin,etc/{init.d,hotplug.d/usb,config}}
             echo "✅ 已创建基础目录结构"
           fi
-        working-directory: ./
 
       - name: 4. 初始化缓存
         uses: actions/cache@v4
@@ -157,8 +156,8 @@ EOF
             fi
           fi
           
-          # 创建WiFi配置（无论custom-files是否存在）
-          cat > files/etc/config/wireless << EOF
+          # 创建WiFi配置（使用单引号避免变量展开问题）
+          cat > files/etc/config/wireless << 'EOF'
 config wifi-device 'radio0'
     option type 'mac80211'
     option path 'platform/soc/fe300000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0'
@@ -172,9 +171,9 @@ config wifi-iface 'default_radio0'
     option device 'radio0'
     option network 'lan'
     option mode 'ap'
-    option ssid '${{ github.event.inputs.wifi_2g_ssid }}'
+    option ssid 'iStoreOS-2.4G'
     option encryption 'psk2'
-    option key '${{ github.event.inputs.wifi_2g_pass }}'
+    option key '12345678'
 
 config wifi-device 'radio1'
     option type 'mac80211'
@@ -189,10 +188,15 @@ config wifi-iface 'default_radio1'
     option device 'radio1'
     option network 'lan'
     option mode 'ap'
-    option ssid '${{ github.event.inputs.wifi_5g_ssid }}'
+    option ssid 'iStoreOS-5G'
     option encryption 'psk2'
-    option key '${{ github.event.inputs.wifi_5g_pass }}'
+    option key '12345678'
 EOF
+          
+          # 使用sed替换WiFi配置中的占位符
+          sed -i "s/iStoreOS-2.4G/${{ github.event.inputs.wifi_2g_ssid }}/g" files/etc/config/wireless
+          sed -i "s/iStoreOS-5G/${{ github.event.inputs.wifi_5g_ssid }}/g" files/etc/config/wireless
+          sed -i "s/12345678/${{ github.event.inputs.wifi_2g_pass }}/g" files/etc/config/wireless
           
           echo "✅ 5G自动启动和WiFi配置集成完成"
 
@@ -321,19 +325,23 @@ EOF
           done
           
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
-          echo "======================================" > 固件信息.txt
-          echo "           iStoreOS固件信息            " >> 固件信息.txt
-          echo "======================================" >> 固件信息.txt
-          echo "设备：RK3568 (XGP)" >> 固件信息.txt
-          echo "编译时间：$(date +"%Y-%m-%d %H:%M:%S")" >> 固件信息.txt
-          echo "Git提交：$SHORT_SHA" >> 固件信息.txt
-          echo "版本：iStoreOS + 5G自动启动" >> 固件信息.txt
-          echo "特性：刷机后自动启动5G和WiFi" >> 固件信息.txt
-          echo "2.4G WiFi：${{ github.event.inputs.wifi_2g_ssid }}" >> 固件信息.txt
-          echo "5G WiFi：${{ github.event.inputs.wifi_5g_ssid }}" >> 固件信息.txt
-          echo "5G APN：${{ github.event.inputs.apn_5g }}" >> 固件信息.txt
-          echo "======================================" >> 固件信息.txt
-          [ -f "MD5校验值.txt" ] && cat MD5校验值.txt >> 固件信息.txt
+          cat > 固件信息.txt << EOF
+======================================
+           iStoreOS固件信息            
+======================================
+设备：RK3568 (XGP)
+编译时间：$(date +"%Y-%m-%d %H:%M:%S")
+Git提交：$SHORT_SHA
+版本：iStoreOS + 5G自动启动
+特性：刷机后自动启动5G和WiFi
+2.4G WiFi：${{ github.event.inputs.wifi_2g_ssid }}
+5G WiFi：${{ github.event.inputs.wifi_5g_ssid }}
+5G APN：${{ github.event.inputs.apn_5g }}
+======================================
+EOF
+          if [ -f "MD5校验值.txt" ]; then
+            cat MD5校验值.txt >> 固件信息.txt
+          fi
 
       - name: 18. 上传iStoreOS固件产物
         uses: actions/upload-artifact@v4
