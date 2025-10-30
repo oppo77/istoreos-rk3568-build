@@ -1,6 +1,5 @@
-name: 【最终版】编译 iStoreOS 固件（RK3568 + 修复libtool安装）
+name: 编译 iStoreOS 固件（RK3568 + 修复libtool安装）
 
-# 环境变量统一管理
 env:
   SOURCE_REPO: "https://github.com/oppo77/istoreos-rk3568-build.git"
   CONFIG_URL: "https://raw.githubusercontent.com/oppo77/istoreos-rk3568-build/refs/heads/main/xgp.config"
@@ -40,22 +39,16 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     steps:
-      ###########################################################################
-      # 前置缓存：修复语法错误（github.sha[:8] → github.sha | slice: 0, 8）
-      ###########################################################################
       - name: 0. 初始化缓存
         uses: actions/cache@v4
         with:
           path: |
             ${{ env.CCACHE_DIR }}
             /var/cache/apt/archives
-          key: ${{ runner.os }}-build-cache-${{ github.sha | slice: 0, 8 }}  # 修复语法
+          key: "${{ runner.os }}-build-cache-${{ github.sha | slice: 0, 8 }}"
           restore-keys: |
-            ${{ runner.os }}-build-cache-
+            "${{ runner.os }}-build-cache-"
 
-      ###########################################################################
-      # 基础准备：拉取代码+清理磁盘（确保空间）
-      ###########################################################################
       - name: 1. 拉取仓库代码
         uses: actions/checkout@v4
         with:
@@ -64,14 +57,10 @@ jobs:
 
       - name: 2. 深度清理磁盘
         run: |
-          echo "=== 清理前磁盘空间 ==="
           df -h /
-          
           sudo rm -rf /usr/share/dotnet /usr/local/share/powershell /usr/local/lib/android /opt/ghc || true
           sudo apt-get -y purge azure-cli* docker* ghc* zulu* llvm* firefox google* powershell* dotnet* mono* || true
           sudo apt-get autoremove -y && sudo apt-get clean
-          
-          echo "=== 清理后磁盘空间 ==="
           df -h /
           FREE_SPACE=$(df -P / | awk 'NR==2 {print $4}')
           if [ $FREE_SPACE -lt 26214400 ]; then
@@ -79,47 +68,35 @@ jobs:
             exit 1
           fi
 
-      ###########################################################################
-      # 核心修复：多方案安装libtool（解决安装失败）
-      ###########################################################################
-      - name: 3. 安装编译依赖（重点修复libtool）
+      - name: 3. 安装编译依赖（修复libtool）
         run: |
-          echo "=== 🔧 开始安装依赖（优先处理libtool） ==="
-          # 步骤1：切换国内apt源（阿里云，解决默认源同步延迟）
           sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
           sudo echo "deb http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
           deb http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
           deb http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
           deb http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse" > /etc/apt/sources.list
           
-          # 步骤2：清理apt缓存+更新源
           sudo apt-get clean
-          sudo apt-get update -y --fix-missing  # 修复缺失的源索引
+          sudo apt-get update -y --fix-missing
           
-          # 步骤3：尝试常规安装（含libtool）
           DEPS="axel ccache git build-essential libncurses5-dev libssl-dev \
             flex bison make gcc g++ gettext python3 python3-pip python3-setuptools \
             unzip wget curl nano file qemu-utils libtool"
           sudo apt-get install -y $DEPS
           
-          # 步骤4：校验libtool是否安装成功，失败则手动下载deb包兜底
           if command -v libtool &> /dev/null; then
             echo "✅ libtool常规安装成功！"
           else
-            echo "⚠️  常规安装失败，尝试手动下载deb包安装..."
-            # 手动下载Ubuntu 22.04 aarch64的libtool deb包（兜底方案）
+            echo "⚠️  常规安装失败，手动下载deb包..."
             axel -n 8 -o libtool.deb "http://mirrors.aliyun.com/ubuntu/pool/main/libt/libtool/libtool_2.4.6-15ubuntu1_amd64.deb"
-            # 强制安装deb包
-            sudo dpkg -i libtool.deb || sudo apt-get -f install -y  # 自动修复依赖
-            # 二次校验
+            sudo dpkg -i libtool.deb || sudo apt-get -f install -y
             if ! command -v libtool &> /dev/null; then
-              echo "❌ 错误：libtool手动安装也失败！"
+              echo "❌ 错误：libtool手动安装失败！"
               exit 1
             fi
             echo "✅ libtool手动安装成功！"
           fi
           
-          # 校验其他关键工具
           TOOLS=("axel" "ccache" "git" "make" "gcc" "g++")
           for tool in "${TOOLS[@]}"; do
             if ! command -v $tool &> /dev/null; then
@@ -127,14 +104,9 @@ jobs:
               exit 1
             fi
           done
-          echo "=== ✅ 所有依赖安装完成 ==="
 
-      ###########################################################################
-      # 源码与配置：完全保留原始配置，仅校验完整性
-      ###########################################################################
       - name: 4. 克隆iStoreOS源码
         run: |
-          echo "=== 克隆源码 ==="
           git clone --depth 1 ${{ env.SOURCE_REPO }} openwrt
           cd openwrt
           git checkout refs/heads/main
@@ -146,12 +118,10 @@ jobs:
               exit 1
             fi
           done
-          echo "=== ✅ 源码克隆完成 ==="
 
-      - name: 5. 下载原始xgp.config（不做任何修改）
+      - name: 5. 下载原始xgp.config（不修改）
         run: |
           cd openwrt
-          echo "=== 下载原始配置 ==="
           axel -n 8 -o .config ${{ env.CONFIG_URL }}
           
           if [ ! -f ".config" ] || [ $(wc -l < .config) -lt 100 ]; then
@@ -163,19 +133,13 @@ jobs:
             echo "❌ 未启用RK3568配置！"
             exit 1
           fi
-          
-          echo "=== ✅ 原始配置校验完成（未修改） ==="
 
-      ###########################################################################
-      # 工具修复+编译准备：确保ipkg-make-index可用
-      ###########################################################################
       - name: 6. 修复ipkg-make-index工具
         run: |
           cd openwrt
           TOOL_PATH=$(find ./staging_dir -name "ipkg-make-index" -type f | head -1)
           
           if [ -z "$TOOL_PATH" ]; then
-            echo "=== 编译opkg主机端 ==="
             make package/system/opkg/host-compile -j1 V=s
             TOOL_PATH=$(find ./staging_dir -name "ipkg-make-index" -type f | head -1)
             if [ -z "$TOOL_PATH" ]; then
@@ -191,53 +155,42 @@ jobs:
           fi
           
           export PATH=$PATH:$(dirname "$TOOL_PATH")
-          echo "=== ✅ 工具验证通过 ==="
 
-      - name: 7. 配置axel下载+清理旧产物
+      - name: 7. 配置axel+清理旧产物
         run: |
           cd openwrt
-          # 优化下载
           sed -i 's/^WGET_CMD.*/WGET_CMD = axel -n 8 -a -o $(DL_DIR)\/\$(FILE) $(URL)/' ./include/download.mk
           echo "DOWNLOAD_TIMEOUT=1200" >> ./include/download.mk
           echo "CONFIG_CCACHE=y" >> .config
           
-          # 清理旧产物
           make clean && make dirclean
           ccache -C
           mkdir -p ${{ env.LOG_DIR }}
-          echo "=== ✅ 准备完成 ==="
 
-      ###########################################################################
-      # 固件编译+产物整理：带日志保存+MD5校验
-      ###########################################################################
-      - name: 8. 编译固件（单线程+日志保存）
+      - name: 8. 编译固件（单线程+日志）
         run: |
           cd openwrt
           TOOL_PATH=$(find ./staging_dir -name "ipkg-make-index" -type f | head -1)
           export PATH=$PATH:$(dirname "$TOOL_PATH")
           
-          echo "=== 开始编译 ==="
           make -j1 V=s 2>&1 | tee ${{ env.LOG_DIR }}/compile.log
           
           if [ ! -d "${{ env.FIRMWARE_DIR }}" ] || ! ls "${{ env.FIRMWARE_DIR }}"/*.img* &> /dev/null; then
             echo "❌ 固件生成失败！"
             exit 1
           fi
-          echo "=== ✅ 编译成功 ==="
 
-      - name: 9. 整理产物（MD5+信息清单）
+      - name: 9. 整理产物（MD5+清单）
         run: |
           mkdir -p final-firmware
           cp "${{ env.FIRMWARE_DIR }}"/*.img.gz final-firmware/ || true
           cp "${{ env.FIRMWARE_DIR }}"/*.img final-firmware/ || true
           
-          # MD5校验
           cd final-firmware
           for file in *.img*; do
             md5sum "$file" >> MD5校验值.txt
           done
           
-          # 信息清单
           echo "======================================" > 固件信息.txt
           echo "         iStoreOS固件信息（RK3568）     " >> 固件信息.txt
           echo "======================================" >> 固件信息.txt
@@ -248,24 +201,19 @@ jobs:
           echo "======================================" >> 固件信息.txt
           echo "MD5校验值：" >> 固件信息.txt
           cat MD5校验值.txt >> 固件信息.txt
-          
-          echo "=== ✅ 产物整理完成 ==="
 
-      ###########################################################################
-      # 产物上传：修复语法错误（github.sha[:8] → github.sha | slice: 0, 8）
-      ###########################################################################
       - name: 10. 上传固件产物
         uses: actions/upload-artifact@v4
         with:
-          name: iStoreOS-RK3568-固件-${{ github.run_number }}-${{ github.sha | slice: 0, 8 }}  # 修复语法
+          name: "iStoreOS-RK3568-固件-${{ github.run_number }}-${{ github.sha | slice: 0, 8 }}"
           path: final-firmware/
           retention-days: 30
           if-no-files-found: error
 
-      - name: 11. 失败兜底：上传编译日志
+      - name: 11. 上传失败日志
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: 编译失败日志-${{ github.run_number }}
+          name: "编译失败日志-${{ github.run_number }}"
           path: ${{ env.LOG_DIR }}/compile.log
           retention-days: 15
