@@ -1,13 +1,13 @@
-name: 编译iStoreOS（WIFI自启+5G自动连+网口转发+防火墙）
+name: 编译iStoreOS（手动触发+修复依赖）
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'xgp.config'
-      - 'device-tree/**'
-      - 'custom-scripts/**'
-      - '.github/workflows/**'
+  # 1. 关闭自动运行：删除push触发，仅保留手动触发（workflow_dispatch）
   workflow_dispatch:
+    # 可选：添加手动触发时的参数（如选择固件版本）
+    inputs:
+      firmware_version:
+        description: '固件版本备注（如v1.0.0）'
+        required: false
+        default: 'dev-build'
 
 jobs:
   compile:
@@ -18,95 +18,78 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 安装所有指定依赖（含5G/设备树/UBoot工具）
+      - name: 修复依赖安装（解决getopt/which缺失+忽略内核警告）
         run: |
-          # 多次更新确保源同步，避免依赖缺失
+          # 忽略内核版本警告：Azure Runner内核由平台管理，不影响交叉编译
+          echo "=== 忽略内核版本警告（不影响iStoreOS编译）==="
+          
+          # 2. 修复依赖：getopt属于util-linux包，which单独安装
           sudo apt update -y
           sudo apt full-upgrade -y
           
-          # 第一部分依赖（含编译核心+设备树+UBoot工具）
+          # 核心依赖（替换getopt为util-linux，新增which）
           sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
             bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext \
             genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev \
             libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
             libreadline-dev libssl-dev libtool llvm lrzsz libnsl-dev ninja-build p7zip p7zip-full patch pkgconf \
             python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
-            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev u-boot-tools libfdt-dev
+            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev u-boot-tools libfdt-dev \
+            util-linux which  # 关键修复：util-linux含getopt，新增which
           
-          # 第二部分补充依赖（去重，确保覆盖）
+          # 补充依赖（去重）
           sudo apt-get install -y binutils bzip2 diffutils findutils flex gawk gcc \
-            getopt grep coreutils libc6-dev zlib1g-dev make perl python3 rsync subversion unzip which
+            grep coreutils libc6-dev zlib1g-dev make perl python3 rsync subversion unzip
           
-          # 第三部分Python依赖（确保编译时脚本运行）
-          sudo apt update && sudo apt install -y python3-dev python3-pip
+          # Python依赖
+          sudo apt install -y python3-dev python3-pip
           sudo pip3 install --upgrade pip
 
       - name: 拉取iStoreOS源码
         run: |
           git clone --depth 1 https://github.com/istoreos/istoreos.git istoreos-src
           cd istoreos-src
-          git checkout main  # 稳定版本可替换为tag，如v23.05.01
+          git checkout main  # 稳定版本可替换为tag（如v23.05.01）
 
       - name: 复制配置文件+设备树+功能脚本
         run: |
-          # 1. 配置文件：xgp.config→源码根目录.config（编译系统默认读取）
           cp xgp.config istoreos-src/.config
-          
-          # 2. 设备树：复制到rockchip armv8架构目录
           cp device-tree/rk3568-xiguapi-v3.dts istoreos-src/target/linux/rockchip/dts/armv8/
           
-          # 3. 创建uci-defaults目录（开机自动执行脚本）
+          # 复制功能脚本到uci-defaults（开机自动执行）
           mkdir -p istoreos-src/package/base-files/files/etc/uci-defaults/
-          
-          # 4. 复制WIFI自启脚本
-          cp custom-scripts/99-wifi-autostart istoreos-src/package/base-files/files/etc/uci-defaults/
-          
-          # 5. 复制5G自动连接脚本
-          cp custom-scripts/98-5g-autoconnect istoreos-src/package/base-files/files/etc/uci-defaults/
-          
-          # 6. 复制网口转发配置脚本
-          cp custom-scripts/97-network-forward istoreos-src/package/base-files/files/etc/uci-defaults/
-          
-          # 7. 复制防火墙配置脚本
-          cp custom-scripts/96-firewall-config istoreos-src/package/base-files/files/etc/uci-defaults/
-          
-          # 8. 赋予所有脚本执行权限
+          cp custom-scripts/* istoreos-src/package/base-files/files/etc/uci-defaults/
           chmod +x istoreos-src/package/base-files/files/etc/uci-defaults/*
 
-      - name: 生成编译配置（基于xgp.config）
+      - name: 生成编译配置
         run: |
           cd istoreos-src
-          make defconfig  # 应用配置，自动处理依赖关联
+          make defconfig
 
-      - name: 编译固件（启用多线程加速）
+      - name: 编译固件
         run: |
           cd istoreos-src
-          make -j$(nproc) V=s  # V=s输出详细日志，便于排查错误
+          make -j$(nproc) V=s
         env:
-          FORCE_UNSAFE_CONFIGURE: 1  # 规避Ubuntu权限校验警告
+          FORCE_UNSAFE_CONFIGURE: 1
 
       - name: 收集编译产物
         run: |
           mkdir -p firmware-output
-          # 复制所有镜像文件（img.gz/bin）和清单文件
           cp istoreos-src/bin/targets/rockchip/armv8/*.img.gz firmware-output/
           cp istoreos-src/bin/targets/rockchip/armv8/*.bin firmware-output/
-          cp istoreos-src/bin/targets/rockchip/armv8/*.manifest firmware-output/
-          # 复制设备树文件（可选，便于单独替换）
           cp istoreos-src/bin/targets/rockchip/armv8/*.dtb firmware-output/
+          cp istoreos-src/bin/targets/rockchip/armv8/*.manifest firmware-output/
 
       - name: 上传产物到GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.sha }}
+          tag_name: ${{ github.event.inputs.firmware_version }}-${{ github.sha }}
           files: firmware-output/*
           body: |
-            功能说明：
-            1. 开机自动启用WIFI（SSID：iStoreOS-Xiguapi，密码：12345678）
-            2. 5G模组自动拨号（APN：3gnet，适配多数运营商）
-            3. 网口转发：LAN→WAN（含5G WAN）自动启用
-            4. 防火墙：允许转发流量，开放5G拨号必要端口
-            配置文件：基于xgp.config编译
-            设备支持：rk3568-xiguapi-v3
+            手动编译产物（版本：${{ github.event.inputs.firmware_version }}）
+            功能：WIFI自启+5G自动识别运营商+网口转发+防火墙
+            设备：rk3568-xiguapi-v3
+            配置文件：xgp.config
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
