@@ -1,0 +1,38 @@
+#!/bin/sh
+# 等待ModemManager服务启动（避免启动时序问题）
+sleep 10
+
+# 1. 清除原有5G连接配置
+uci delete network.5g 2>/dev/null
+uci delete network.5g_iface 2>/dev/null
+
+# 2. 配置5G接口（基于QMI协议，若用MBIM可改为proto='mbim'）
+uci set network.5g=interface
+uci set network.5g.proto='qmi'
+uci set network.5g.device='/dev/cdc-wdm0'  # 5G模组默认设备节点
+uci set network.5g.apn='3gnet'           # 运营商APN（移动/联通：3gnet，电信：ctnet）
+uci set network.5g.pincode=''            # 若SIM卡有PIN，填写PIN码
+uci set network.5g.auth='none'           # 认证方式（多数为none，部分需chap）
+uci set network.5g.defaultroute='1'      # 设为默认路由
+uci set network.5g.peerdns='1'           # 自动获取DNS
+
+# 3. 配置5G防火墙zone（加入WAN区，启用转发）
+uci set firewall.@zone[1].network='wan 5g'  # 把5G接口加入WAN zone（默认wan是[1]，需确认）
+
+# 4. 配置ModemManager开机启动
+uci set system.@system[0].modemmanager_enable='1'
+/etc/init.d/modemmanager enable
+
+# 5. 提交配置并重启服务
+uci commit network
+uci commit firewall
+uci commit system
+/etc/init.d/network restart
+/etc/init.d/modemmanager restart
+
+# 6. 手动触发5G拨号（防止自动拨号失败）
+sleep 5
+if ! qmicli -d /dev/cdc-wdm0 --wds-start-network=3gnet --client-no-release-cid; then
+    echo "5G拨号重试..."
+    qmicli -d /dev/cdc-wdm0 --wds-start-network=3gnet --client-no-release-cid
+fi
