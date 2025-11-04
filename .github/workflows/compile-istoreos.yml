@@ -1,4 +1,4 @@
-name: 编译iStoreOS（which兜底+不终止流程）
+name: 编译iStoreOS（which兜底+不终 止流程）
 on:
   workflow_dispatch:
     inputs:
