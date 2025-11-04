@@ -1,4 +1,4 @@
-name: 编译iStoreOS（手动触发+日志清理+依赖修复）
+name: 编译iStoreOS（修复依赖+feeds安装+日志清理）
 on:
   workflow_dispatch:
     inputs:
@@ -11,104 +11,130 @@ jobs:
   compile:
     runs-on: ubuntu-22.04
     steps:
-      - name: 检出仓库代码
+      - name: 检出仓库代码（含xgp.config、设备树、功能脚本）
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: 修复依赖安装
+      - name: 阶段1：同步APT源+安装基础依赖（解决which/getopt问题）
         run: |
+          # 1. 强制同步APT源，确保包列表最新（关键：解决which找不到的问题）
           sudo apt update -y
           sudo apt full-upgrade -y
-          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext \
-            genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev \
-            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
-            libreadline-dev libssl-dev libtool llvm lrzsz libnsl-dev ninja-build p7zip p7zip-full patch pkgconf \
-            python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
-            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev u-boot-tools libfdt-dev \
-            util-linux which  # 修复getopt/which依赖
-          sudo apt install -y python3-dev python3-pip
+          
+          # 2. 安装用户指定的基础依赖：替换getopt为util-linux（Ubuntu无独立getopt包）
+          sudo apt-get install -y \
+            git \  # 用户单独指定，拉源码必需
+            binutils bzip2 diffutils findutils flex gawk gcc \
+            util-linux grep coreutils libc6-dev zlib1g-dev \  # util-linux含getopt
+            make perl python3 rsync subversion unzip which \  # 包含用户指定的which
+            u-boot-tools \  # 用户指定：UBoot工具
+            device-tree-compiler libfdt-dev  # 用户指定：设备树编译工具
+
+      - name: 阶段2：安装Python相关依赖（用户指定）
+        run: |
+          sudo apt install -y \
+            python3-pyelftools python3-setuptools swig \
+            python3-dev python3-pip
+          # 升级pip，避免安装Python包时版本兼容问题
           sudo pip3 install --upgrade pip
 
-      - name: 拉取iStoreOS源码
+      - name: 阶段3：拉取iStoreOS源码
         run: |
           git clone --depth 1 https://github.com/istoreos/istoreos.git istoreos-src
           cd istoreos-src
+          # 切换到稳定版本（可选，如v23.05.01，避免源码主干不稳定）
           git checkout main
 
-      - name: 复制配置文件+设备树+功能脚本
-        run: |
-          cp xgp.config istoreos-src/.config
-          cp device-tree/rk3568-xiguapi-v3.dts istoreos-src/target/linux/rockchip/dts/armv8/
-          mkdir -p istoreos-src/package/base-files/files/etc/uci-defaults/
-          cp custom-scripts/* istoreos-src/package/base-files/files/etc/uci-defaults/
-          chmod +x istoreos-src/package/base-files/files/etc/uci-defaults/*
-
-      - name: 生成编译配置
+      - name: 阶段4：安装iStoreOS feeds包（用户指定：libpam等）
         run: |
           cd istoreos-src
+          # 1. 先更新feeds索引（必需：否则无法找到指定包）
+          ./scripts/feeds update -a
+          # 2. 安装用户指定的feeds包（libpam、luci-theme-argon等）
+          ./scripts/feeds install \
+            libpam libev attr curl liblzma libnetsnmp luci-theme-argon
+          # 3. 补充安装功能必需的feeds包（避免5G/WIFI功能缺失）
+          ./scripts/feeds install \
+            modemmanager uqmi umbim luci-proto-qmi luci-proto-mbim
+
+      - name: 阶段5：复制配置文件+设备树+开机脚本
+        run: |
+          cd istoreos-src
+          # 1. 复制编译配置（xgp.config→.config）
+          cp ../xgp.config .config
+          # 2. 复制设备树到对应目录
+          cp ../device-tree/rk3568-xiguapi-v3.dts target/linux/rockchip/dts/armv8/
+          # 3. 复制开机功能脚本（WIFI/5G/转发/防火墙）
+          mkdir -p package/base-files/files/etc/uci-defaults/
+          cp ../custom-scripts/* package/base-files/files/etc/uci-defaults/
+          # 4. 赋予脚本执行权限
+          chmod +x package/base-files/files/etc/uci-defaults/*
+
+      - name: 阶段6：生成编译配置（应用依赖）
+        run: |
+          cd istoreos-src
+          # 基于.config生成最终编译配置，自动处理feeds包依赖
           make defconfig
 
-      - name: 编译固件（日志重定向到文件）
+      - name: 阶段7：编译固件（日志重定向到文件）
         run: |
           cd istoreos-src
-          # 关键：将编译日志（stdout+stderr）重定向到compile.log，便于后续清理
+          # 日志重定向到compile.log，便于后续清理
           make -j$(nproc) V=s > compile.log 2>&1
         env:
-          FORCE_UNSAFE_CONFIGURE: 1
+          FORCE_UNSAFE_CONFIGURE: 1  # 规避Ubuntu权限警告
 
-      - name: 日志清理（仅保留最近1分钟日志）
+      - name: 阶段8：日志清理（仅保留最近1分钟）
         run: |
           cd istoreos-src
-          # 1. 定义1分钟前的时间（格式：HH:MM，匹配日志时间戳）
+          # 1. 计算1分钟前的时间（格式：HH:MM）
           ONE_MINUTE_AGO=$(date -d "1 minute ago" +"%H:%M")
-          echo "=== 开始清理日志：仅保留 $ONE_MINUTE_AGO 之后的日志 ==="
+          echo "=== 清理日志：保留 $ONE_MINUTE_AGO 之后的内容 ==="
           
-          # 2. 检查日志文件是否存在，且包含时间戳（OpenWrt日志格式：[HH:MM:SS] ...）
+          # 2. 筛选日志（仅保留带时间戳的近期日志）
           if [ -f "compile.log" ] && grep -q "\[..:..:..\]" "compile.log"; then
-              # 提取日志时间戳的HH:MM部分，筛选>=1分钟前的行，覆盖原日志
               awk -v ago="$ONE_MINUTE_AGO" '
                 /^\[..:..:..\]/ {
-                  # 提取时间戳的HH:MM（如[10:05:30] → 10:05）
-                  log_time = substr($0, 2, 5);
-                  # 保留时间戳>=1分钟前的行，或无时间戳的关键行（如最后编译结果）
-                  if (log_time >= ago || log_time == "") print $0;
+                  log_hhmm = substr($0, 2, 5);  # 提取[HH:MM:SS]中的HH:MM
+                  if (log_hhmm >= ago) print $0;
                 }
-                # 保留无时间戳的行（避免遗漏编译结果提示）
-                !/^\[..:..:..\]/ { print $0; }
+                !/^\[..:..:..\]/ { print $0; }  # 保留无时间戳的关键结果
               ' compile.log > compile_cleaned.log
-              
-              # 替换原日志为清理后的日志，删除临时文件
               mv compile_cleaned.log compile.log
-              echo "=== 日志清理完成，当前日志大小：$(du -sh compile.log | awk '{print $1}') ==="
+              echo "=== 日志清理完成，大小：$(du -sh compile.log | awk '{print $1}') ==="
           else
-              # 极端情况：日志无时间戳，保留全部日志并提示
-              echo "=== 日志无时间戳，跳过清理，保留全部日志 ==="
+              echo "=== 日志无时间戳，保留全部内容 ==="
           fi
 
-      - name: 收集编译产物（含清理后的日志）
+      - name: 阶段9：收集产物（固件+清理后的日志）
         run: |
           mkdir -p firmware-output
           # 复制固件文件
           cp istoreos-src/bin/targets/rockchip/armv8/*.img.gz firmware-output/
           cp istoreos-src/bin/targets/rockchip/armv8/*.bin firmware-output/
           cp istoreos-src/bin/targets/rockchip/armv8/*.dtb firmware-output/
-          cp istoreos-src/bin/targets/rockchip/armv8/*.manifest firmware-output/
-          # 复制清理后的日志（便于排查问题）
+          # 复制编译日志（便于排查问题）
           cp istoreos-src/compile.log firmware-output/
-          echo "=== 产物列表 ==="
-          ls -lh firmware-output/
+          # 复制包清单（确认feeds包已安装）
+          cp istoreos-src/bin/targets/rockchip/armv8/*.manifest firmware-output/
 
-      - name: 上传产物到GitHub Releases
+      - name: 阶段10：上传产物到GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.firmware_version }}-${{ github.sha }}
           files: firmware-output/*
           body: |
-            手动编译产物（版本：${{ github.event.inputs.firmware_version }}）
-            功能：WIFI自启+5G运营商自动识别+网口转发+防火墙
-            设备：rk3568-xiguapi-v3
-            日志说明：仅保留编译最后1分钟日志（compile.log）
+            ### 编译信息
+            - 版本：${{ github.event.inputs.firmware_version }}
+            - 设备：rk3568-xiguapi-v3
+            - 配置文件：xgp.config
+            - 依赖：已整合所有指定包（含libpam、luci-theme-argon等）
+            
+            ### 功能清单
+            1. WIFI开机自启（SSID：iStoreOS-Xiguapi，密码：12345678）
+            2. 5G自动识别运营商（QMI/MBIM双协议，APN自动匹配）
+            3. 网口转发（LAN→WAN/5G）+ 防火墙配置
+            4. 日志清理：仅保留编译最后1分钟日志（compile.log）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
