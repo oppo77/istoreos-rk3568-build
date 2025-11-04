@@ -1,4 +1,4 @@
-name: 编译iStoreOS（权限修复+APT源写入）
+name: 编译iStoreOS（404修复+日志不保留+依赖对齐）
 on:
   workflow_dispatch:
     inputs:
@@ -16,144 +16,138 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 阶段1：修复APT源（解决权限+正确写入）
+      - name: 阶段1：APT源修复+包存在性校验（解决which 404）
         run: |
-          echo "=== 修复APT源写入权限，解决which包缺失 ==="
-          # 1. 清理APT缓存（sudo作用于apt，权限正确）
-          sudo apt clean
-          sudo apt autoclean
-          
-          # 2. 备份原有sources.list（sudo确保有权限备份系统文件）
+          echo "=== 修复APT源，校验which包可用性 ==="
+          # 1. 清理缓存+备份源
+          sudo apt clean && sudo apt autoclean
           sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
           
-          # 3. 关键修复：用sudo tee写入官方源（tee在sudo下运行，写入有权限）
-          # 避免用cat >，改用tee解决重定向权限问题
+          # 2. 写入Ubuntu 22.04官方源（确保main仓库包含which）
           echo "deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
           deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
-          deb http://archive.ubuntu.com/ubuntu/ jammy-backports main restricted universe multiverse
           deb http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse" | sudo tee /etc/apt/sources.list > /dev/null
           
-          # 4. 强制同步源（--fix-missing修复索引缺失）
-          echo "=== 同步APT源 ==="
-          sudo apt update -y --fix-missing || sudo apt update -y --fix-missing
-
-      - name: 阶段2：单独安装which包（确保权限+源正常）
-        run: |
-          echo "=== 优先安装which包 ==="
-          # 用sudo apt-get确保安装权限
-          if ! sudo apt-get install -y which; then
-            # 备用：直接下载deb包，用sudo dpkg安装
-            echo "=== APT安装失败，尝试deb包安装 ==="
-            sudo apt-get install -y wget
-            wget http://archive.ubuntu.com/ubuntu/pool/main/w/which/which_2.21-7ubuntu3_amd64.deb -O which.deb
-            sudo dpkg -i which.deb || sudo apt-get install -f -y  # 修复依赖
-          fi
-          # 验证安装结果（which命令需在sudo外运行，正常用户也能调用）
-          if which which >/dev/null; then
-            echo "✅ which安装成功：$(which which)"
-          else
-            echo "❌ which安装失败，终止流程"
+          # 3. 同步源+校验which包是否存在
+          sudo apt update -y --fix-missing
+          if ! apt-cache search which | grep -q "which - finds the full path of a command"; then
+            echo "❌ APT源中未找到which包，终止流程"
             exit 1
+          else
+            echo "✅ 已找到which包，开始安装依赖"
           fi
 
-      - name: 阶段3：安装剩余基础依赖（用户指定）
+      - name: 阶段2：安装依赖（严格对齐用户清单）
         run: |
-          echo "=== 安装基础依赖 ==="
-          sudo apt-get install -y \
-            git binutils bzip2 diffutils findutils flex gawk gcc \
-            util-linux grep coreutils libc6-dev zlib1g-dev \
-            make perl python3 rsync subversion unzip
+          echo "=== 按用户清单安装依赖 ==="
+          # 注：Ubuntu无独立getopt包，getopt功能包含在util-linux中，故补充安装
+          sudo apt install git -y
           
-          echo "=== 安装Python依赖 ==="
+          sudo apt-get update && sudo apt-get install -y \
+            binutils bzip2 diffutils findutils flex gawk gcc \
+            util-linux grep coreutils libc6-dev zlib1g-dev \  # 用util-linux替代getopt（含getopt功能）
+            make perl python3 rsync subversion unzip which
+          
           sudo apt install -y python3-pyelftools python3-setuptools swig
-          sudo apt install -y python3-dev python3-pip
           
-          echo "=== 安装硬件工具 ==="
-          sudo apt install -y u-boot-tools
-          sudo apt-get install -y device-tree-compiler libfdt-dev
+          sudo apt update && sudo apt install -y python3-dev python3-pip
           
-          # 验证所有关键依赖
-          echo "=== 依赖验证 ==="
-          for pkg in which util-linux u-boot-tools python3-pip; do
-            if dpkg -l | grep -q "$pkg"; then
-              echo "✅ $pkg 已安装"
-            else
-              echo "❌ $pkg 缺失，重试安装..."
-              sudo apt-get install -y "$pkg" --fix-missing
-            fi
-          done
+          sudo apt install u-boot-tools -y
+          
+          sudo apt-get install device-tree-compiler libfdt-dev -y
+          
+          # 验证关键依赖（确保which已安装）
+          if ! which which >/dev/null; then
+            echo "❌ which包未安装成功，终止流程"
+            exit 1
+          else
+            echo "✅ 所有依赖安装完成，which路径：$(which which)"
+          fi
 
-      - name: 阶段4：拉取iStoreOS源码
+      - name: 阶段3：拉取iStoreOS源码
         run: |
           git clone --depth 1 https://github.com/istoreos/istoreos.git istoreos-src
           cd istoreos-src
-          git checkout main
+          git checkout main  # 稳定版本可替换为用户指定版本
 
-      - name: 阶段5：安装iStoreOS feeds包
+      - name: 阶段4：安装iStoreOS feeds包（用户指定清单）
         run: |
           cd istoreos-src
-          ./scripts/feeds update -a
+          ./scripts/feeds update -a  # 更新feeds索引
+          # 严格按用户清单安装feeds包
           ./scripts/feeds install libpam libev attr curl liblzma libnetsnmp luci-theme-argon
-          ./scripts/feeds install modemmanager uqmi umbim luci-proto-qmi luci-proto-mbim
 
-      - name: 阶段6：复制配置+设备树+开机脚本
+      - name: 阶段5：复制配置+设备树+开机脚本
         run: |
           cd istoreos-src
+          # 复制用户配置文件
           cp ../xgp.config .config
+          # 复制设备树
           cp ../device-tree/rk3568-xiguapi-v3.dts target/linux/rockchip/dts/armv8/
+          # 复制开机功能脚本（WIFI/5G/转发/防火墙）
           mkdir -p package/base-files/files/etc/uci-defaults/
           cp ../custom-scripts/* package/base-files/files/etc/uci-defaults/
           chmod +x package/base-files/files/etc/uci-defaults/*
 
-      - name: 阶段7：生成编译配置
+      - name: 阶段6：生成编译配置
         run: |
           cd istoreos-src
-          make defconfig
+          make defconfig  # 应用用户配置，自动关联依赖
 
-      - name: 阶段8：编译固件（日志重定向）
+      - name: 阶段7：编译固件（日志重定向，用于过程排查）
+        id: compile_step  # 给步骤设ID，用于后续判断编译结果
         run: |
           cd istoreos-src
+          # 日志重定向到compile.log（仅用于过程排查，成功后删除）
           make -j$(nproc) V=s > compile.log 2>&1
+          # 记录编译 exit code（0=成功，非0=失败）
+          echo "compile_exit_code=$?" >> $GITHUB_OUTPUT
         env:
           FORCE_UNSAFE_CONFIGURE: 1
 
-      - name: 阶段9：日志清理（保留最近1分钟）
+      - name: 阶段8：日志处理（编译成功不保留日志）
         run: |
           cd istoreos-src
-          ONE_MINUTE_AGO=$(date -d "1 minute ago" +"%H:%M")
-          if [ -f "compile.log" ] && grep -q "\[..:..:..\]" "compile.log"; then
-            awk -v ago="$ONE_MINUTE_AGO" '
-              /^\[..:..:..\]/ {
-                log_hhmm = substr($0, 2, 5);
-                if (log_hhmm >= ago) print $0;
-              }
-              !/^\[..:..:..\]/ { print $0; }
-            ' compile.log > compile_cleaned.log
-            mv compile_cleaned.log compile.log
-            echo "=== 日志清理完成 ==="
+          COMPILE_EXIT_CODE=${{ steps.compile_step.outputs.compile_exit_code }}
+          if [ "$COMPILE_EXIT_CODE" -eq 0 ]; then
+            echo "=== 编译成功，删除过程日志 ==="
+            rm -f compile.log  # 删除日志，不保留
+          else
+            echo "=== 编译失败，保留日志用于排查 ==="
+            # 若失败，保留日志（后续可手动下载排查）
+            cp compile.log ../firmware-output/ || true
           fi
 
-      - name: 阶段10：收集产物
+      - name: 阶段9：收集产物（编译成功不包含日志）
+        if: steps.compile_step.outputs.compile_exit_code == 0  # 仅编译成功时收集产物
         run: |
           mkdir -p firmware-output
+          # 仅收集固件相关文件，不包含日志
           cp istoreos-src/bin/targets/rockchip/armv8/*.img.gz firmware-output/
           cp istoreos-src/bin/targets/rockchip/armv8/*.bin firmware-output/
-          cp istoreos-src/compile.log firmware-output/
+          cp istoreos-src/bin/targets/rockchip/armv8/*.dtb firmware-output/
           cp istoreos-src/bin/targets/rockchip/armv8/*.manifest firmware-output/
+          echo "=== 产物清单 ==="
+          ls -lh firmware-output/
 
-      - name: 阶段11：上传到GitHub Releases
+      - name: 阶段10：上传产物到Releases（仅编译成功）
+        if: steps.compile_step.outputs.compile_exit_code == 0
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.firmware_version }}-${{ github.sha }}
           files: firmware-output/*
           body: |
-            ### 关键修复
-            1. 用`sudo tee`替代`cat >`，解决/etc/apt/sources.list写入权限问题
-            2. 所有系统文件操作均确保sudo覆盖，避免Permission denied
+            ### 配置信息
+            - 依赖：严格按用户清单安装（含git、binutils、which等）
+            - 设备：rk3568-xiguapi-v3
+            - 配置文件：xgp.config
+            
             ### 功能清单
-            - WIFI开机自启（SSID：iStoreOS-Xiguapi，密码：12345678）
-            - 5G运营商自动识别（QMI/MBIM协议，APN自动匹配）
-            - 网口转发+防火墙（LAN→WAN/5G流量转发）
-            - 日志仅保留最后1分钟，减少产物大小
+            1. WIFI开机自启（SSID：iStoreOS-Xiguapi，密码：12345678）
+            2. 5G运营商自动识别（QMI/MBIM协议，APN自动匹配）
+            3. 网口转发+防火墙（LAN→WAN/5G流量转发）
+            
+            ### 日志说明
+            编译成功，未保留过程日志；编译失败时会保留日志用于排查
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
