@@ -1,38 +1,81 @@
 #!/bin/sh
-# 等待ModemManager服务启动（避免启动时序问题）
-sleep 10
+# 5G模组自动识别运营商并拨号（优先自动获取APN，失败则IMSI匹配）
+sleep 12  # 延长等待时间，确保ModemManager完全识别SIM卡
 
-# 1. 清除原有5G连接配置
+# 1. 定义国内三大运营商的IMSI前缀与APN映射（可扩展其他运营商）
+declare -A OPERATOR_APN=(
+    ["46000"]="3gnet"    # 中国移动（IMSI前缀46000/46002）
+    ["46002"]="3gnet"
+    ["46001"]="3gnet"    # 中国联通（IMSI前缀46001）
+    ["46003"]="ctnet"    # 中国电信（IMSI前缀46003，需注意：部分电信卡用ctwap）
+    ["46011"]="3gnet"    # 中国广电（IMSI前缀46011）
+)
+
+# 2. 获取Modem编号（默认取第一个识别到的模组，多模组需调整）
+MODEM_ID=$(mmcli -L | grep -oP '/Modem/\K\d+' | head -n 1)
+if [ -z "$MODEM_ID" ]; then
+    echo "未识别到5G模组，退出脚本"
+    exit 1
+fi
+echo "已识别5G模组，编号：$MODEM_ID"
+
+# 3. 尝试让ModemManager自动获取APN（优先方案）
+echo "尝试自动获取运营商APN..."
+AUTO_APN=$(mmcli -m $MODEM_ID --command='AT+CGDCONT?' | grep -oP ',"\K[^"]+' | head -n 1)
+# 部分模组自动获取的APN可能为空，需二次验证
+if [ -n "$AUTO_APN" ] && [ "$AUTO_APN" != "none" ]; then
+    OPERATOR_APN_FINAL="$AUTO_APN"
+    echo "自动获取APN成功：$OPERATOR_APN_FINAL"
+else
+    # 4. 自动获取失败，通过IMSI前缀匹配APN（ fallback方案）
+    echo "自动获取APN失败，尝试通过IMSI识别运营商..."
+    IMSI=$(mmcli -m $MODEM_ID --command='AT+CIMI' | grep -oP '^\d+' | head -n 1)
+    if [ -z "$IMSI" ]; then
+        echo "无法读取IMSI，使用默认APN：3gnet"
+        OPERATOR_APN_FINAL="3gnet"
+    else
+        # 提取IMSI前5位（覆盖主流运营商前缀）
+        IMSI_PREFIX=${IMSI:0:5}
+        echo "读取到IMSI：$IMSI，前缀：$IMSI_PREFIX"
+        # 匹配APN，无匹配则用默认值
+        OPERATOR_APN_FINAL=${OPERATOR_APN[$IMSI_PREFIX]:-3gnet}
+        echo "匹配运营商APN：$OPERATOR_APN_FINAL"
+    fi
+fi
+
+# 5. 清除原有5G配置，应用自动识别的APN
 uci delete network.5g 2>/dev/null
 uci delete network.5g_iface 2>/dev/null
 
-# 2. 配置5G接口（基于QMI协议，若用MBIM可改为proto='mbim'）
+# 配置5G接口（QMI协议，MBIM模组需改为proto='mbim'，device='/dev/mbim0'）
 uci set network.5g=interface
 uci set network.5g.proto='qmi'
-uci set network.5g.device='/dev/cdc-wdm0'  # 5G模组默认设备节点
-uci set network.5g.apn='3gnet'           # 运营商APN（移动/联通：3gnet，电信：ctnet）
-uci set network.5g.pincode=''            # 若SIM卡有PIN，填写PIN码
-uci set network.5g.auth='none'           # 认证方式（多数为none，部分需chap）
-uci set network.5g.defaultroute='1'      # 设为默认路由
-uci set network.5g.peerdns='1'           # 自动获取DNS
+uci set network.5g.device='/dev/cdc-wdm0'  # 多数QMI模组默认设备节点
+uci set network.5g.apn="$OPERATOR_APN_FINAL"  # 自动识别的APN
+uci set network.5g.pincode=''                # SIM卡有PIN则填写
+uci set network.5g.auth='none'               # 多数运营商无需认证，部分需chap
+uci set network.5g.defaultroute='1'          # 设为默认路由（优先走5G上网）
+uci set network.5g.peerdns='1'               # 自动获取DNS（运营商提供）
 
-# 3. 配置5G防火墙zone（加入WAN区，启用转发）
-uci set firewall.@zone[1].network='wan 5g'  # 把5G接口加入WAN zone（默认wan是[1]，需确认）
+# 6. 将5G接口加入WAN防火墙 zone（允许转发和外网访问）
+uci set firewall.@zone[1].network="wan 5g"  # 确保WAN zone包含5G接口
 
-# 4. 配置ModemManager开机启动
+# 7. 启用ModemManager开机自启，提交配置
 uci set system.@system[0].modemmanager_enable='1'
 /etc/init.d/modemmanager enable
-
-# 5. 提交配置并重启服务
 uci commit network
 uci commit firewall
 uci commit system
+
+# 8. 重启网络服务，触发5G拨号
 /etc/init.d/network restart
 /etc/init.d/modemmanager restart
-
-# 6. 手动触发5G拨号（防止自动拨号失败）
 sleep 5
-if ! qmicli -d /dev/cdc-wdm0 --wds-start-network=3gnet --client-no-release-cid; then
-    echo "5G拨号重试..."
-    qmicli -d /dev/cdc-wdm0 --wds-start-network=3gnet --client-no-release-cid
+
+# 9. 验证拨号结果
+if qmicli -d /dev/cdc-wdm0 --wds-get-current-settings | grep -q 'IP address'; then
+    echo "5G拨号成功！APN：$OPERATOR_APN_FINAL"
+else
+    echo "5G拨号失败，尝试重试..."
+    qmicli -d /dev/cdc-wdm0 --wds-start-network="$OPERATOR_APN_FINAL" --client-no-release-cid
 fi
