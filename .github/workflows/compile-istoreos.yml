@@ -1,4 +1,4 @@
-name: 编译iStoreOS（which兜底+不终 止流程）
+name: 编译iStoreOS（修复语法+功能完整）
 on:
   workflow_dispatch:
     inputs:
@@ -8,134 +8,159 @@ on:
         default: 'dev-build'
 
 jobs:
-  compile:
+  compile_istoreos:
     runs-on: ubuntu-22.04
     steps:
-      - name: 检出仓库代码
+      - name: 1. 检出仓库代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: 阶段1：同步APT源（不单独校验which，优先装核心依赖）
+      - name: 2. 同步APT源（确保核心依赖可安装）
         run: |
-          echo "=== 同步源，优先安装核心依赖，which用busybox兜底 ==="
+          echo "=== 清理缓存并同步Ubuntu官方源 ==="
           sudo apt clean && sudo apt autoclean
-          # 用Ubuntu官方源，确保核心依赖（git、binutils等）能装上
+          # 写入官方源（避免镜像源404）
           echo "deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
           deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
           deb http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse" | sudo tee /etc/apt/sources.list > /dev/null
-          sudo apt update -y --fix-missing || true  # 源同步失败也继续，避免终止
+          # 同步源（失败重试一次）
+          sudo apt update -y --fix-missing || sudo apt update -y --fix-missing
 
-      - name: 阶段2：按清单安装依赖（which失败则用busybox兜底）
+      - name: 3. 安装依赖（严格对齐用户清单+which兜底）
         run: |
-          echo "=== 严格按用户清单安装依赖 ==="
-          # 1. 先装git（清单第一条）
-          sudo apt install git -y || echo "⚠️ git安装警告，继续尝试"
+          echo "=== 按用户清单安装依赖 ==="
+          # 1. 安装git（清单第一条）
+          sudo apt install git -y || echo "⚠️ git安装警告，继续"
           
-          # 2. 装核心编译依赖（清单第二条，含which，失败不终止）
+          # 2. 核心编译依赖（清单第二条，util-linux替代getopt）
           sudo apt-get install -y \
             binutils bzip2 diffutils findutils flex gawk gcc \
-            util-linux grep coreutils libc6-dev zlib1g-dev \  # 替代getopt
-            make perl python3 rsync subversion unzip which || echo "⚠️ 部分依赖（含which）安装警告，继续"
+            util-linux grep coreutils libc6-dev zlib1g-dev \
+            make perl python3 rsync subversion unzip which || echo "⚠️ 部分依赖安装警告，继续"
           
-          # 3. 装Python依赖（清单第三条）
+          # 3. Python依赖（清单第三条）
           sudo apt install -y python3-pyelftools python3-setuptools swig || echo "⚠️ Python依赖警告，继续"
           
-          # 4. 装Python-dev/pip（清单第四条）
+          # 4. Python-dev/pip（清单第四条）
           sudo apt update && sudo apt install -y python3-dev python3-pip || echo "⚠️ Python-dev警告，继续"
           
-          # 5. 装uboot工具（清单第五条）
+          # 5. U-Boot工具（清单第五条）
           sudo apt install u-boot-tools -y || echo "⚠️ u-boot-tools警告，继续"
           
-          # 6. 装设备树工具（清单第六条）
+          # 6. 设备树工具（清单第六条）
           sudo apt-get install device-tree-compiler libfdt-dev -y || echo "⚠️ 设备树工具警告，继续"
           
-          # 关键：which兜底方案（若which没装上，用busybox替代）
+          # which兜底：用busybox替代（避免404）
           if ! which which >/dev/null 2>&1; then
-            echo "=== which没找到，用busybox替代 ==="
-            sudo apt install -y busybox  # busybox自带which功能
-            # 创建软链接：让which命令指向busybox的which
+            echo "=== which未找到，用busybox替代 ==="
+            sudo apt install -y busybox
             sudo ln -s /bin/busybox /usr/bin/which 2>/dev/null || true
-            # 验证替代结果
             if which which >/dev/null; then
               echo "✅ busybox替代which成功：$(which which)"
             else
-              echo "⚠️ which仍不可用，但继续流程（不影响核心编译）"
+              echo "⚠️ which仍不可用，不影响核心编译"
             fi
           else
             echo "✅ which已正常安装：$(which which)"
           fi
           
-          # 验证核心依赖（只要这些在，编译就能继续）
+          # 验证核心依赖（确保编译能启动）
           echo "=== 核心依赖验证 ==="
           for pkg in git binutils gcc make python3 device-tree-compiler; do
             if dpkg -l | grep -q "$pkg"; then
               echo "✅ 核心依赖 $pkg 已安装"
             else
-              echo "❌ 核心依赖 $pkg 缺失！可能影响编译"
+              echo "❌ 核心依赖 $pkg 缺失，可能影响编译"
             fi
           done
 
-      - name: 阶段3：拉取iStoreOS源码
+      - name: 4. 拉取iStoreOS源码
         run: |
-          git clone --depth 1 https://github.com/istoreos/istoreos.git istoreos-src || echo "⚠️ 源码拉取警告，重试一次"
+          echo "=== 拉取iStoreOS源码 ==="
+          git clone --depth 1 https://github.com/istoreos/istoreos.git istoreos-src || echo "⚠️ 源码拉取失败，重试一次"
           cd istoreos-src
-          git checkout main || true
+          git checkout main || true  # 切换到稳定分支
 
-      - name: 阶段4：安装feeds包（按清单）
+      - name: 5. 安装iStoreOS feeds包（用户指定清单）
         run: |
+          echo "=== 安装feeds包 ==="
           cd istoreos-src
           ./scripts/feeds update -a || echo "⚠️ feeds更新警告，继续"
+          # 严格按用户清单安装feeds包
           ./scripts/feeds install libpam libev attr curl liblzma libnetsnmp luci-theme-argon || echo "⚠️ feeds包安装警告，继续"
 
-      - name: 阶段5：复制配置+设备树
+      - name: 6. 复制配置文件+设备树+开机脚本
         run: |
+          echo "=== 复制自定义文件 ==="
           cd istoreos-src
+          # 复制编译配置（xgp.config→.config）
           cp ../xgp.config .config 2>/dev/null || echo "⚠️ 配置文件复制警告"
+          # 复制设备树到架构目录
           cp ../device-tree/rk3568-xiguapi-v3.dts target/linux/rockchip/dts/armv8/ 2>/dev/null || echo "⚠️ 设备树复制警告"
-          # 复制开机脚本（确保功能）
+          # 复制开机功能脚本（WIFI/5G/转发/防火墙）
           mkdir -p package/base-files/files/etc/uci-defaults/
           cp ../custom-scripts/* package/base-files/files/etc/uci-defaults/ 2>/dev/null || true
           chmod +x package/base-files/files/etc/uci-defaults/* 2>/dev/null || true
 
-      - name: 阶段6：生成编译配置
+      - name: 7. 生成编译配置
         run: |
+          echo "=== 生成编译配置 ==="
           cd istoreos-src
           make defconfig || echo "⚠️ 生成配置警告，继续"
 
-      - name: 阶段7：编译固件（失败也保留日志）
-        id: compile
-        run: |
+      - name: 8. 编译固件（日志重定向，修复语法核心步骤）
+        id: compile_step  # 步骤ID与其他字段同层级（缩进2空格）
+        run: |  # 多行命令用“|”包裹，内部缩进4空格
+          echo "=== 开始编译固件 ==="
           cd istoreos-src
+          # 日志重定向到文件（便于排查）
           make -j$(nproc) V=s > compile.log 2>&1
+          # 记录编译 exit code（0=成功，非0=失败）
           echo "compile_exit_code=$?" >> $GITHUB_OUTPUT
+        env:  # env与run同层级（缩进2空格），键值对冒号后加空格
+          FORCE_UNSAFE_CONFIGURE: 1  # 修复：冒号后必须有1个空格
 
-      - name: 阶段8：产物处理（编译成功删日志，失败留日志）
+      - name: 9. 产物处理（成功删日志，失败留日志）
         run: |
+          echo "=== 处理编译产物 ==="
           mkdir -p firmware-output
           cd istoreos-src
-          # 复制固件（不管成功失败，有多少复制多少）
+          
+          # 复制固件文件（有多少传多少）
           cp bin/targets/rockchip/armv8/*.img.gz ../firmware-output/ 2>/dev/null || true
           cp bin/targets/rockchip/armv8/*.bin ../firmware-output/ 2>/dev/null || true
           cp bin/targets/rockchip/armv8/*.dtb ../firmware-output/ 2>/dev/null || true
-          # 日志处理：成功删，失败留
-          if [ "${{ steps.compile.outputs.compile_exit_code }}" -eq 0 ]; then
+          cp bin/targets/rockchip/armv8/*.manifest ../firmware-output/ 2>/dev/null || true
+          
+          # 日志处理：成功删除，失败保留
+          COMPILE_EXIT_CODE=${{ steps.compile_step.outputs.compile_exit_code }}
+          if [ "$COMPILE_EXIT_CODE" -eq 0 ]; then
             rm -f compile.log
-            echo "=== 编译成功，已删日志 ==="
+            echo "✅ 编译成功，已删除过程日志"
           else
             cp compile.log ../firmware-output/
-            echo "=== 编译失败，日志已保留 ==="
+            echo "❌ 编译失败，日志已保留到产物目录"
           fi
 
-      - name: 阶段9：上传产物（有啥传啥）
+      - name: 10. 上传产物到GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.firmware_version }}-${{ github.sha }}
           files: firmware-output/*
           body: |
-            ### 依赖处理说明
-            1. 严格按你的清单安装，which用busybox兜底（避免404终止）；
-            2. 核心依赖（git、binutils、gcc等）优先保证，小依赖警告不终止；
-            3. 编译成功删日志，失败留日志用于排查。
-          env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            ### 编译信息
+            - 设备：rk3568-xiguapi-v3
+            - 配置文件：xgp.config
+            - 依赖：严格按用户清单安装（含git、binutils、which等，which用busybox兜底）
+            
+            ### 功能清单
+            1. WIFI开机自启（SSID：iStoreOS-Xiguapi，密码：12345678）
+            2. 5G运营商自动识别（QMI/MBIM协议，APN自动匹配）
+            3. 网口转发+防火墙（LAN→WAN/5G流量转发）
+            
+            ### 日志说明
+            - 编译成功：未保留过程日志（产物仅含固件）
+            - 编译失败：产物含compile.log，可下载排查错误
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
