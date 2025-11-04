@@ -1,8 +1,6 @@
-name: 编译iStoreOS（手动触发+修复依赖）
+name: 编译iStoreOS（手动触发+日志清理+依赖修复）
 on:
-  # 1. 关闭自动运行：删除push触发，仅保留手动触发（workflow_dispatch）
   workflow_dispatch:
-    # 可选：添加手动触发时的参数（如选择固件版本）
     inputs:
       firmware_version:
         description: '固件版本备注（如v1.0.0）'
@@ -18,16 +16,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 修复依赖安装（解决getopt/which缺失+忽略内核警告）
+      - name: 修复依赖安装
         run: |
-          # 忽略内核版本警告：Azure Runner内核由平台管理，不影响交叉编译
-          echo "=== 忽略内核版本警告（不影响iStoreOS编译）==="
-          
-          # 2. 修复依赖：getopt属于util-linux包，which单独安装
           sudo apt update -y
           sudo apt full-upgrade -y
-          
-          # 核心依赖（替换getopt为util-linux，新增which）
           sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
             bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext \
             genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev \
@@ -35,13 +27,7 @@ jobs:
             libreadline-dev libssl-dev libtool llvm lrzsz libnsl-dev ninja-build p7zip p7zip-full patch pkgconf \
             python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
             swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev u-boot-tools libfdt-dev \
-            util-linux which  # 关键修复：util-linux含getopt，新增which
-          
-          # 补充依赖（去重）
-          sudo apt-get install -y binutils bzip2 diffutils findutils flex gawk gcc \
-            grep coreutils libc6-dev zlib1g-dev make perl python3 rsync subversion unzip
-          
-          # Python依赖
+            util-linux which  # 修复getopt/which依赖
           sudo apt install -y python3-dev python3-pip
           sudo pip3 install --upgrade pip
 
@@ -49,14 +35,12 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/istoreos/istoreos.git istoreos-src
           cd istoreos-src
-          git checkout main  # 稳定版本可替换为tag（如v23.05.01）
+          git checkout main
 
       - name: 复制配置文件+设备树+功能脚本
         run: |
           cp xgp.config istoreos-src/.config
           cp device-tree/rk3568-xiguapi-v3.dts istoreos-src/target/linux/rockchip/dts/armv8/
-          
-          # 复制功能脚本到uci-defaults（开机自动执行）
           mkdir -p istoreos-src/package/base-files/files/etc/uci-defaults/
           cp custom-scripts/* istoreos-src/package/base-files/files/etc/uci-defaults/
           chmod +x istoreos-src/package/base-files/files/etc/uci-defaults/*
@@ -66,20 +50,55 @@ jobs:
           cd istoreos-src
           make defconfig
 
-      - name: 编译固件
+      - name: 编译固件（日志重定向到文件）
         run: |
           cd istoreos-src
-          make -j$(nproc) V=s
+          # 关键：将编译日志（stdout+stderr）重定向到compile.log，便于后续清理
+          make -j$(nproc) V=s > compile.log 2>&1
         env:
           FORCE_UNSAFE_CONFIGURE: 1
 
-      - name: 收集编译产物
+      - name: 日志清理（仅保留最近1分钟日志）
+        run: |
+          cd istoreos-src
+          # 1. 定义1分钟前的时间（格式：HH:MM，匹配日志时间戳）
+          ONE_MINUTE_AGO=$(date -d "1 minute ago" +"%H:%M")
+          echo "=== 开始清理日志：仅保留 $ONE_MINUTE_AGO 之后的日志 ==="
+          
+          # 2. 检查日志文件是否存在，且包含时间戳（OpenWrt日志格式：[HH:MM:SS] ...）
+          if [ -f "compile.log" ] && grep -q "\[..:..:..\]" "compile.log"; then
+              # 提取日志时间戳的HH:MM部分，筛选>=1分钟前的行，覆盖原日志
+              awk -v ago="$ONE_MINUTE_AGO" '
+                /^\[..:..:..\]/ {
+                  # 提取时间戳的HH:MM（如[10:05:30] → 10:05）
+                  log_time = substr($0, 2, 5);
+                  # 保留时间戳>=1分钟前的行，或无时间戳的关键行（如最后编译结果）
+                  if (log_time >= ago || log_time == "") print $0;
+                }
+                # 保留无时间戳的行（避免遗漏编译结果提示）
+                !/^\[..:..:..\]/ { print $0; }
+              ' compile.log > compile_cleaned.log
+              
+              # 替换原日志为清理后的日志，删除临时文件
+              mv compile_cleaned.log compile.log
+              echo "=== 日志清理完成，当前日志大小：$(du -sh compile.log | awk '{print $1}') ==="
+          else
+              # 极端情况：日志无时间戳，保留全部日志并提示
+              echo "=== 日志无时间戳，跳过清理，保留全部日志 ==="
+          fi
+
+      - name: 收集编译产物（含清理后的日志）
         run: |
           mkdir -p firmware-output
+          # 复制固件文件
           cp istoreos-src/bin/targets/rockchip/armv8/*.img.gz firmware-output/
           cp istoreos-src/bin/targets/rockchip/armv8/*.bin firmware-output/
           cp istoreos-src/bin/targets/rockchip/armv8/*.dtb firmware-output/
           cp istoreos-src/bin/targets/rockchip/armv8/*.manifest firmware-output/
+          # 复制清理后的日志（便于排查问题）
+          cp istoreos-src/compile.log firmware-output/
+          echo "=== 产物列表 ==="
+          ls -lh firmware-output/
 
       - name: 上传产物到GitHub Releases
         uses: softprops/action-gh-release@v2
@@ -88,8 +107,8 @@ jobs:
           files: firmware-output/*
           body: |
             手动编译产物（版本：${{ github.event.inputs.firmware_version }}）
-            功能：WIFI自启+5G自动识别运营商+网口转发+防火墙
+            功能：WIFI自启+5G运营商自动识别+网口转发+防火墙
             设备：rk3568-xiguapi-v3
-            配置文件：xgp.config
+            日志说明：仅保留编译最后1分钟日志（compile.log）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
