@@ -21,15 +21,6 @@ jobs:
           fetch-depth: 1
           submodules: 'recursive'
 
-      # 2. 部署用户文件（dtb、config）
-      - name: 部署设备树与编译配置
-        run: |
-          # 部署dtb（若源码未包含）
-          mkdir -p target/linux/rockchip/dts/rk3568/
-          cp ${{ github.workspace }}/rk3568-xiguapi-v3.dtb target/linux/rockchip/dts/rk3568/
-          # 部署config
-          cp ${{ github.workspace }}/xgp.config .config
-
       # 3. 安装编译依赖（与本地步骤一致）
       - name: 安装编译依赖
         run: |
