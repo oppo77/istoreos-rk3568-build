@@ -1,0 +1,28 @@
+#!/bin/sh
+# 等待系统网络服务初始化
+sleep 5
+
+# 清除原有无线配置
+uci delete wireless.@wifi-device[0] 2>/dev/null
+uci delete wireless.@wifi-iface[0] 2>/dev/null
+
+# 配置WIFI设备（mt7916为例，根据实际芯片调整）
+uci set wireless.radio0=wifi-device
+uci set wireless.radio0.type='mac80211'
+uci set wireless.radio0.path='platform/fe610000.spi'  # 对应dts中spi节点
+uci set wireless.radio0.htmode='HT20'
+uci set wireless.radio0.channel='auto'
+uci set wireless.radio0.disabled='0'  # 启用WIFI设备
+
+# 配置WIFI热点（2.4G，可新增5G配置）
+uci set wireless.default_radio0=wifi-iface
+uci set wireless.default_radio0.device='radio0'
+uci set wireless.default_radio0.network='lan'
+uci set wireless.default_radio0.mode='ap'
+uci set wireless.default_radio0.ssid='iStoreOS-Xiguapi'  # 自定义SSID
+uci set wireless.default_radio0.encryption='psk2'  # 加密方式
+uci set wireless.default_radio0.key='12345678'  # 自定义密码
+
+# 提交配置并重启网络
+uci commit wireless
+/etc/init.d/network restart
