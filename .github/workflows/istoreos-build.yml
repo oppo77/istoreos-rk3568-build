@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt update && sudo apt upgrade -y
           # 基础依赖
-          sudo apt-get install -y binutils bzip2 diffutils findutils flex gawk gcc getopt grep coreutils libc6-dev zlib1g-dev make perl python3 rsync subversion unzip which
+          sudo apt-get install -y binutils bzip2 diffutils findutils flex gawk gcc grep coreutils libc6-dev zlib1g-dev make perl python3 rsync subversion unzip 
           # Python依赖
           sudo apt install -y python3-pyelftools python3-setuptools swig python3-dev python3-pip
           # U-Boot与设备树依赖
