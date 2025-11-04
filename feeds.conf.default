@@ -1,0 +1,8 @@
+src-git packages https://bgithub.xyz/jjm2473/packages.git;istoreos-24.10
+src-git luci https://bgithub.xyz/jjm2473/luci.git;istoreos-24.10
+src-git routing https://bgithub.xyz/openwrt/routing.git;openwrt-24.10
+src-git telephony https://bgithub.xyz/openwrt/telephony.git;openwrt-24.10
+# istore
+src-git store https://bgithub.xyz/linkease/istore.git;main
+# argon, etc.
+src-git third https://bgithub.xyz/jjm2473/openwrt-third.git;main
