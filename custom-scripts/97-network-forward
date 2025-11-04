@@ -1,0 +1,29 @@
+#!/bin/sh
+# 1. 启用内核IP转发（永久生效）
+echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/90-ip-forward.conf
+echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/90-ip-forward.conf
+sysctl -p /etc/sysctl.d/90-ip-forward.conf  # 立即生效
+
+# 2. 配置LAN区到WAN区的转发（通过uci防火墙规则）
+# 确认LAN zone（默认是[0]）和WAN zone（默认是[1]）
+uci set firewall.@forwarding[0]='forwarding'
+uci set firewall.@forwarding[0].src='lan'
+uci set firewall.@forwarding[0].dest='wan'
+
+# 3. 配置LAN到5G接口的转发（若5G未加入WAN zone，单独配置）
+uci set firewall.@forwarding[1]='forwarding'
+uci set firewall.@forwarding[1].src='lan'
+uci set firewall.@forwarding[1].dest='5g'  # 与5G接口名一致
+
+# 4. 配置网口桥接（若有多个LAN口，桥接为br-lan）
+uci delete network.lan.ifname 2>/dev/null
+uci set network.lan.ifname='eth0 eth1'  # 替换为实际LAN网口（如eth0、eth1）
+uci set network.lan.type='bridge'
+uci set network.lan.proto='static'
+uci set network.lan.ipaddr='192.168.1.1'  # LAN网段（可修改）
+uci set network.lan.netmask='255.255.255.0'
+
+# 5. 提交配置并重启网络
+uci commit network
+uci commit firewall
+/etc/init.d/network restart
